@@ -140,12 +140,10 @@ def webhook():
     return "!", 200
 
 # ====== Установка webhook ======
-@app.before_first_request
-def set_webhook():
-    webhook_url = f"{os.getenv('WEBHOOK_URL')}/webhook/{API_TOKEN}"
-    bot.remove_webhook()
-    bot.set_webhook(url=webhook_url)
-    logging.info(f"Webhook установлен: {webhook_url}")
+webhook_url = f"{os.getenv('WEBHOOK_URL')}/webhook/{API_TOKEN}"
+bot.remove_webhook()
+bot.set_webhook(url=webhook_url)
+logging.info(f"Webhook установлен: {webhook_url}")
 
 # ====== Запуск Flask ======
 if __name__ == "__main__":
