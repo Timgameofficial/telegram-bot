@@ -3,21 +3,16 @@ import logging
 from flask import Flask, request
 import telebot
 from telebot import types
-from datetime import datetime
-import threading
 
 # ====== Конфигурация ======
 API_TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Публичный URL Render
 
 bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
-# ====== Логирование ======
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 
 # ====== Хранилища ======
 waiting_for_admin = {}  # {admin_id: user_id}
@@ -40,7 +35,7 @@ def about_company(message):
     markup.add("🏠 Додому")
     bot.send_message(
         message.chat.id,
-        "Ми створюємо телеграм ботів. Детальніше: https://www.instagram.com/p/DOEpwuEiLuC/?igsh=MTdjY3l4Mmt1d2VoeQ==",
+        "Ми створюємо телеграм ботів. Детальніше: https://www.instagram.com/p/DOEpwuEiLuC/",
         reply_markup=markup
     )
 
@@ -50,7 +45,7 @@ def quick_answer(message):
     markup.add("🏠 Додому")
     bot.send_message(
         message.chat.id,
-        "Наш бот приймає повідомлення 25/8! Адмін може спати, але обов’язково відповість 😉",
+        "Наш бот приймає повідомлення 25/8! Адмін відповість 😉",
         reply_markup=markup
     )
 
@@ -58,16 +53,16 @@ def quick_answer(message):
 def go_home(message):
     bot.send_message(message.chat.id, "Ви повернулися до головного меню 👇", reply_markup=get_main_menu())
 
+# ====== Пользователь пишет админу ======
 @bot.message_handler(func=lambda msg: msg.text == "📝 Написати адміну")
 def write_admin(message):
-    bot.send_message(message.chat.id, "✍️ Напишіть повідомлення адміністратору (текст/фото/відео/документ):")
+    bot.send_message(message.chat.id, "✍️ Напишіть повідомлення адміністратору:")
     bot.register_next_step_handler(message, forward_to_admin)
 
 def forward_to_admin(message):
     user_id = message.from_user.id
     name = message.from_user.first_name or "Без имени"
     username = f"@{message.from_user.username}" if message.from_user.username else "—"
-
     caption = f"📩 Допис від {name}\nID: <code>{user_id}</code>\nUsername: {username}"
 
     markup = types.InlineKeyboardMarkup()
@@ -90,6 +85,7 @@ def forward_to_admin(message):
         logging.exception(f"Помилка при надсиланні адміну(user_id={user_id})")
         bot.send_message(user_id, "❌ Помилка надсилання повідомлення. Спробуйте пізніше.")
 
+# ====== Админ отвечает ======
 @bot.callback_query_handler(func=lambda call: call.data.startswith("reply_"))
 def admin_reply(call):
     if call.from_user.id != ADMIN_ID:
@@ -120,31 +116,16 @@ def send_admin_reply(message):
         logging.exception(f"Помилка під час відповіді користувачу {user_id}")
         bot.send_message(ADMIN_ID, f"❌ Помилка при надсиланні відповіді користувачу {user_id}")
 
-# ====== Поток времени (для логирования) ======
-def print_time_periodically():
-    while True:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"Текущее время: {now}")
-        import time
-        time.sleep(300)
-
-time_thread = threading.Thread(target=print_time_periodically, daemon=True)
-time_thread.start()
-
 # ====== Webhook endpoint ======
 @app.route(f"/webhook/{API_TOKEN}", methods=["POST"])
 def webhook():
-    json_string = request.get_data().decode("utf-8")
-    update = telebot.types.Update.de_json(json_string)
+    json_str = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
-    return "!", 200
+    return "OK", 200
 
-# ====== Установка webhook ======
-webhook_url = f"{os.getenv('WEBHOOK_URL')}/webhook/{API_TOKEN}"
-bot.remove_webhook()
-bot.set_webhook(url=webhook_url)
-logging.info(f"Webhook установлен: {webhook_url}")
-
-# ====== Запуск Flask ======
+# ====== Запуск Flask и установка вебхука ======
 if __name__ == "__main__":
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{WEBHOOK_URL}/webhook/{API_TOKEN}")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
