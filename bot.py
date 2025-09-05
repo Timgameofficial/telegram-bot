@@ -15,7 +15,7 @@ if not ADMIN_ID:
     logging.warning("ADMIN_ID не задан! Сообщения админу не будут доставляться.")
 
 bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
-app = Flask(name)
+app = Flask(__name__)
 
 # ====== Логирование ======
 logging.basicConfig(
@@ -102,7 +102,6 @@ def forward_to_admin(message):
         logging.exception(f"Помилка при надсиланні адміну(user_id={user_id})")
         bot.send_message(user_id, "❌ Помилка надсилання повідомлення. Спробуйте пізніше.")
 
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith("reply_"))
 def admin_reply(call):
     if call.from_user.id != ADMIN_ID:
@@ -153,5 +152,6 @@ def set_webhook():
     else:
         return "Ошибка установки webhook"
 
-if name == "main":
+# ====== Запуск ======
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), threaded=False)
