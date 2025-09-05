@@ -122,15 +122,6 @@ def send_admin_reply(message):
         logging.exception(f"Помилка під час відповіді користувачу {user_id}")
         bot.send_message(ADMIN_ID, f"❌ Помилка при надсиланні відповіді користувачу {user_id}")
 
-# ====== Поток времени ======
-def print_time_periodically():
-    while True:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"Текущее время: {now}")
-        time.sleep(300)
-
-time_thread = threading.Thread(target=print_time_periodically, daemon=True)
-time_thread.start()
 
 # ====== Webhook endpoint ======
 @app.route(f"/webhook/{API_TOKEN}", methods=["POST"])
