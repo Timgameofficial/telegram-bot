@@ -1,16 +1,17 @@
+import os
+import logging
+from flask import Flask, request
 import telebot
 from telebot import types
-import logging
-import os
-import time
 from datetime import datetime
 import threading
 
 # ====== Конфигурация ======
-API_TOKEN = os.getenv("API_TOKEN")  # Токен берем из переменных окружения
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # ID админа тоже
+API_TOKEN = os.getenv("API_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
+app = Flask(__name__)
 
 # ====== Логирование ======
 logging.basicConfig(
@@ -28,7 +29,7 @@ def get_main_menu():
     markup.add("📝 Написати адміну")
     return markup
 
-# ====== /start ======
+# ====== Хендлеры бота ======
 @bot.message_handler(commands=["start"])
 def start(message):
     bot.send_message(
@@ -37,7 +38,6 @@ def start(message):
         reply_markup=get_main_menu()
     )
 
-# ====== О компании ======
 @bot.message_handler(func=lambda msg: msg.text == "📢 Про нас")
 def about_company(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -48,7 +48,6 @@ def about_company(message):
         reply_markup=markup
     )
 
-# ====== Быстрый ответ ======
 @bot.message_handler(func=lambda msg: msg.text == "Графік роботи")
 def quick_answer(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -59,7 +58,6 @@ def quick_answer(message):
         reply_markup=markup
     )
 
-# ====== Кнопка Домой ======
 @bot.message_handler(func=lambda msg: msg.text == "🏠 Додому")
 def go_home(message):
     bot.send_message(
@@ -68,7 +66,6 @@ def go_home(message):
         reply_markup=get_main_menu()
     )
 
-# ====== Пользователь пишет админу ======
 @bot.message_handler(func=lambda msg: msg.text == "📝 Написати адміну")
 def write_admin(message):
     bot.send_message(message.chat.id, "✍️ Напишіть повідомлення адміністратору (текст/фото/відео/документ):")
@@ -105,7 +102,6 @@ def forward_to_admin(message):
         logging.exception(f"Помилка при надсиланні адміну(user_id={user_id})")
         bot.send_message(user_id, "❌ Помилка надсилання повідомлення. Спробуйте пізніше.")
 
-# ====== Админ выбирает ответ ======
 @bot.callback_query_handler(func=lambda call: call.data.startswith("reply_"))
 def admin_reply(call):
     if call.from_user.id != ADMIN_ID:
@@ -114,14 +110,11 @@ def admin_reply(call):
     waiting_for_admin[ADMIN_ID] = user_id
     bot.send_message(ADMIN_ID, f"✍️ Введіть відповідь для користувача {user_id}:")
 
-# ====== Ответ админа ======
 @bot.message_handler(func=lambda msg: msg.from_user.id == ADMIN_ID)
 def send_admin_reply(message):
     if ADMIN_ID not in waiting_for_admin:
         return
-
     user_id = waiting_for_admin.pop(ADMIN_ID)
-
     try:
         if message.photo:
             bot.send_photo(user_id, message.photo[-1].file_id, caption=f"💬 Адміністратор:\n{message.caption or ''}")
@@ -149,15 +142,14 @@ def print_time_periodically():
 time_thread = threading.Thread(target=print_time_periodically, daemon=True)
 time_thread.start()
 
-# ====== Запуск ======
-def main():
-    logging.info("Бот запущен")
-    while True:
-        try:
-            bot.infinity_polling(timeout=10, long_polling_timeout=5)
-        except Exception as e:
-            logging.exception("Фатальна помилка, перезапуск...")
-            time.sleep(5)
+# ====== Webhook endpoint ======
+@app.route(f"/webhook/{API_TOKEN}", methods=["POST"])
+def webhook():
+    json_string = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return "!", 200
 
+# ====== Запуск Flask ======
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
