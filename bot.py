@@ -5,8 +5,6 @@ import telebot
 from telebot import types
 from datetime import datetime
 import threading
-import requests
-import time
 
 # ====== Конфигурация ======
 API_TOKEN = os.getenv("API_TOKEN")
@@ -122,6 +120,16 @@ def send_admin_reply(message):
         logging.exception(f"Помилка під час відповіді користувачу {user_id}")
         bot.send_message(ADMIN_ID, f"❌ Помилка при надсиланні відповіді користувачу {user_id}")
 
+# ====== Поток времени (для логирования) ======
+def print_time_periodically():
+    while True:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"Текущее время: {now}")
+        import time
+        time.sleep(300)
+
+time_thread = threading.Thread(target=print_time_periodically, daemon=True)
+time_thread.start()
 
 # ====== Webhook endpoint ======
 @app.route(f"/webhook/{API_TOKEN}", methods=["POST"])
@@ -131,13 +139,13 @@ def webhook():
     bot.process_new_updates([update])
     return "!", 200
 
-# ====== Авто-установка webhook при старте ======
+# ====== Установка webhook ======
+@app.before_first_request
 def set_webhook():
-    url = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{API_TOKEN}"
-    r = requests.get(f"https://api.telegram.org/bot{API_TOKEN}/setWebhook?url={url}")
-    print(r.text)
-
-set_webhook()  # вызывается один раз при запуске Render
+    webhook_url = f"{os.getenv('WEBHOOK_URL')}/webhook/{API_TOKEN}"
+    bot.remove_webhook()
+    bot.set_webhook(url=webhook_url)
+    logging.info(f"Webhook установлен: {webhook_url}")
 
 # ====== Запуск Flask ======
 if __name__ == "__main__":
