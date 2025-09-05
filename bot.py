@@ -1,17 +1,21 @@
 import os
+import html
 import logging
 from flask import Flask, request
 import telebot
 from telebot import types
-from datetime import datetime
-import threading
 
 # ====== Конфигурация ======
 API_TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
+if not API_TOKEN:
+    raise ValueError("Не задан API_TOKEN!")
+if not ADMIN_ID:
+    logging.warning("ADMIN_ID не задан! Сообщения админу не будут доставляться.")
+
 bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
-app = Flask(__name__)
+app = Flask(name)
 
 # ====== Логирование ======
 logging.basicConfig(
@@ -20,7 +24,8 @@ logging.basicConfig(
 )
 
 # ====== Хранилища ======
-waiting_for_admin = {}  # {admin_id: user_id}
+waiting_for_admin = {}   # {admin_id: user_id}
+waiting_for_message = {} # {user_id: True}
 
 # ====== Главное меню ======
 def get_main_menu():
@@ -29,12 +34,12 @@ def get_main_menu():
     markup.add("📝 Написати адміну")
     return markup
 
-# ====== Хендлеры бота ======
+# ====== Хендлеры ======
 @bot.message_handler(commands=["start"])
 def start(message):
     bot.send_message(message.chat.id, "Ласкаво просимо! Виберіть дію в меню 👇", reply_markup=get_main_menu())
 
-@bot.message_handler(func=lambda msg: msg.text == "📢 Про нас")
+@bot.message_handler(func=lambda msg: msg.text == "📢 Про нас", content_types=["text"])
 def about_company(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("🏠 Додому")
@@ -44,7 +49,7 @@ def about_company(message):
         reply_markup=markup
     )
 
-@bot.message_handler(func=lambda msg: msg.text == "Графік роботи")
+@bot.message_handler(func=lambda msg: msg.text == "Графік роботи", content_types=["text"])
 def quick_answer(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("🏠 Додому")
@@ -54,22 +59,29 @@ def quick_answer(message):
         reply_markup=markup
     )
 
-@bot.message_handler(func=lambda msg: msg.text == "🏠 Додому")
+@bot.message_handler(func=lambda msg: msg.text == "🏠 Додому", content_types=["text"])
 def go_home(message):
     bot.send_message(message.chat.id, "Ви повернулися до головного меню 👇", reply_markup=get_main_menu())
 
-@bot.message_handler(func=lambda msg: msg.text == "📝 Написати адміну")
+@bot.message_handler(func=lambda msg: msg.text == "📝 Написати адміну", content_types=["text"])
 def write_admin(message):
+    waiting_for_message[message.from_user.id] = True
     bot.send_message(message.chat.id, "✍️ Напишіть повідомлення адміністратору (текст/фото/відео/документ):")
-    bot.register_next_step_handler(message, forward_to_admin)
 
+@bot.message_handler(content_types=["text", "photo", "video", "document", "voice"])
 def forward_to_admin(message):
     user_id = message.from_user.id
-    name = message.from_user.first_name or "Без имени"
-    username = f"@{message.from_user.username}" if message.from_user.username else "—"
+
+    # Если пользователь не в режиме отправки админу — пропускаем
+    if user_id not in waiting_for_message:
+        return
+
+    waiting_for_message.pop(user_id)
+
+    name = html.escape(message.from_user.first_name or "Без имени")
+    username = html.escape(f"@{message.from_user.username}" if message.from_user.username else "—")
 
     caption = f"📩 Допис від {name}\nID: <code>{user_id}</code>\nUsername: {username}"
-
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("✉️ Відповісти", callback_data=f"reply_{user_id}"))
 
@@ -83,12 +95,13 @@ def forward_to_admin(message):
         elif message.voice:
             bot.send_voice(ADMIN_ID, message.voice.file_id, caption=caption, reply_markup=markup)
         else:
-            bot.send_message(ADMIN_ID, f"{caption}\n\n{message.text or ''}", reply_markup=markup)
+            bot.send_message(ADMIN_ID, f"{caption}\n\n{html.escape(message.text or '')}", reply_markup=markup)
 
         bot.send_message(user_id, "✅ Повідомлення надіслано адміну!")
     except Exception:
         logging.exception(f"Помилка при надсиланні адміну(user_id={user_id})")
         bot.send_message(user_id, "❌ Помилка надсилання повідомлення. Спробуйте пізніше.")
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("reply_"))
 def admin_reply(call):
@@ -98,7 +111,7 @@ def admin_reply(call):
     waiting_for_admin[ADMIN_ID] = user_id
     bot.send_message(ADMIN_ID, f"✍️ Введіть відповідь для користувача {user_id}:")
 
-@bot.message_handler(func=lambda msg: msg.from_user.id == ADMIN_ID)
+@bot.message_handler(func=lambda msg: msg.from_user.id == ADMIN_ID, content_types=["text", "photo", "video", "document", "voice"])
 def send_admin_reply(message):
     if ADMIN_ID not in waiting_for_admin:
         return
@@ -123,12 +136,15 @@ def send_admin_reply(message):
 # ====== Webhook endpoint ======
 @app.route(f"/webhook/{API_TOKEN}", methods=["POST"])
 def webhook():
-    json_string = request.get_data().decode("utf-8")
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
+    try:
+        json_string = request.get_data().decode("utf-8")
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+    except Exception:
+        logging.exception("Ошибка при обработке апдейта")
     return "OK", 200
 
-# ====== Настройка webhook для Render ======
+# ====== Настройка webhook ======
 @app.route("/set_webhook", methods=["GET"])
 def set_webhook():
     webhook_url = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{API_TOKEN}"
@@ -137,6 +153,6 @@ def set_webhook():
     else:
         return "Ошибка установки webhook"
 
-# ====== Запуск Flask ======
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+# ====== Запуск ======
+if name == "main":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), threaded=False)
