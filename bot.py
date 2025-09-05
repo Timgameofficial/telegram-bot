@@ -5,6 +5,7 @@ import telebot
 from telebot import types
 from datetime import datetime
 import threading
+import requests
 
 # ====== Конфигурация ======
 API_TOKEN = os.getenv("API_TOKEN")
@@ -32,11 +33,7 @@ def get_main_menu():
 # ====== Хендлеры бота ======
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.send_message(
-        message.chat.id,
-        "Ласкаво просимо! Виберіть дію в меню 👇",
-        reply_markup=get_main_menu()
-    )
+    bot.send_message(message.chat.id, "Ласкаво просимо! Виберіть дію в меню 👇", reply_markup=get_main_menu())
 
 @bot.message_handler(func=lambda msg: msg.text == "📢 Про нас")
 def about_company(message):
@@ -60,11 +57,7 @@ def quick_answer(message):
 
 @bot.message_handler(func=lambda msg: msg.text == "🏠 Додому")
 def go_home(message):
-    bot.send_message(
-        message.chat.id,
-        "Ви повернулися до головного меню 👇",
-        reply_markup=get_main_menu()
-    )
+    bot.send_message(message.chat.id, "Ви повернулися до головного меню 👇", reply_markup=get_main_menu())
 
 @bot.message_handler(func=lambda msg: msg.text == "📝 Написати адміну")
 def write_admin(message):
@@ -76,11 +69,7 @@ def forward_to_admin(message):
     name = message.from_user.first_name or "Без имени"
     username = f"@{message.from_user.username}" if message.from_user.username else "—"
 
-    caption = (
-        f"📩 Допис від {name}\n"
-        f"ID: <code>{user_id}</code>\n"
-        f"Username: {username}"
-    )
+    caption = f"📩 Допис від {name}\nID: <code>{user_id}</code>\nUsername: {username}"
 
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("✉️ Відповісти", callback_data=f"reply_{user_id}"))
@@ -149,6 +138,14 @@ def webhook():
     update = telebot.types.Update.de_json(json_string)
     bot.process_new_updates([update])
     return "!", 200
+
+# ====== Авто-установка webhook при старте ======
+def set_webhook():
+    url = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{API_TOKEN}"
+    r = requests.get(f"https://api.telegram.org/bot{API_TOKEN}/setWebhook?url={url}")
+    print(r.text)
+
+set_webhook()  # вызывается один раз при запуске Render
 
 # ====== Запуск Flask ======
 if __name__ == "__main__":
