@@ -6,6 +6,7 @@ from telebot import types
 from datetime import datetime
 import threading
 import requests
+import time
 
 # ====== Конфигурация ======
 API_TOKEN = os.getenv("API_TOKEN")
