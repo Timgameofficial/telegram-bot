@@ -76,3 +76,8 @@ def application(env, start_response):
         MainProtokol(str(e), 'Ошибка')
         start_response('200 OK', [('Content-Type', 'text/html')])
         return [str(e).encode('utf-8')]
+
+
+from flask import Flask
+
+app = Flask(__name__)
