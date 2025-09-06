@@ -1,34 +1,78 @@
+import time
+import json
+import requests
 import os
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://your-app.onrender.com
-PORT = int(os.environ.get("PORT", 5000))
+# ====== Логирование ======
+def MainProtokol(s, ts='Запись'):
+    dt = time.strftime('%d.%m.%Y %H:%M:') + '00'
+    with open('log.txt', 'a') as f:
+        f.write(f"{dt};{ts};{s}\n")
 
-if not TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN not set")
+# ====== Конфигурация ======
+TOKEN = os.getenv("API_TOKEN")  # Telegram токен
+ADMIN_ID = os.getenv("ADMIN_ID")  # ID админа
 
-# --- Команды ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! ✅ Я работаю на python-telegram-bot")
+# ====== Главное меню ======
+MAIN_MENU = ["📢 Про нас", "Графік роботи", "📝 Написати адміну"]
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Echo: {update.message.text}")
+# ====== Функция отправки сообщений ======
+def send_message(chat_id, text):
+    url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
+    payload = {'chat_id': chat_id, 'text': text}
+    resp = requests.post(url, data=payload)
+    if not resp.ok:
+        raise ValueError(f"Не удалось отправить сообщение: {resp.text}")
+    return resp
 
-# --- Запуск ---
-def main():
-    app = Application.builder().token(TOKEN).build()
+# ====== Основной обработчик webhook ======
+def application(env, start_response):
+    try:
+        content = ''
+        path = env.get('PATH_INFO', '')
+        if path.lower() == '/tg_bot':
+            wsgi_input = env['wsgi.input'].read()
+            data_raw = wsgi_input.decode('utf-8').replace('\n', ' ')
+            
+            try:
+                update = json.loads(data_raw)
+            except Exception:
+                raise ValueError("Не удалось распарсить JSON")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+            # ====== Получаем данные от пользователя ======
+            message = update.get('message')
+            if not message:
+                raise ValueError("Нет поля 'message' в JSON")
 
-    # Render → запускаем как webhook
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=WEBHOOK_URL + "/webhook"
-    )
+            chat_id = message['chat']['id']
+            text = message.get('text', '')
+            first_name = message['from'].get('first_name', 'Без имени')
 
-if __name__ == "__main__":
-    main()
+            # ====== Обработка команд и кнопок ======
+            if text == '/start':
+                msg = "Ласкаво просимо! Виберіть дію в меню 👇\n" + "\n".join(MAIN_MENU)
+                send_message(chat_id, msg)
+            elif text == "📢 Про нас":
+                send_message(chat_id, "Ми створюємо телеграм ботів. Детальніше: https://www.instagram.com/p/DOEpwuEiLuC/?igsh=MTdjY3l4Mmt1d2VoeQ==")
+            elif text == "Графік роботи":
+                send_message(chat_id, "Наш бот приймає повідомлення 25/8! Адмін може спати, але обов’язково відповість 😉")
+            elif text == "📝 Написати адміну":
+                send_message(chat_id, "✍️ Напишіть повідомлення адміністратору (текст/фото/відео/документ):")
+            else:
+                # Просто пересылаем админу любое другое сообщение
+                admin_msg = f"📩 Допис від {first_name}\nID: {chat_id}\nТекст: {text}"
+                send_message(ADMIN_ID, admin_msg)
+                send_message(chat_id, "✅ Повідомлення надіслано адміну!")
+
+        elif path == '/':
+            MainProtokol('кто-то просто зашел на сайт')
+        else:
+            raise ValueError(f"Вызов неизвестного URL :: {path}")
+
+        start_response('200 OK', [('Content-Type', 'text/html')])
+        return [content.encode('utf-8')]
+
+    except Exception as e:
+        MainProtokol(str(e), 'Ошибка')
+        start_response('200 OK', [('Content-Type', 'text/html')])
+        return [str(e).encode('utf-8')]
