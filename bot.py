@@ -1,59 +1,34 @@
-
 import os
-from flask import Flask, request, abort
-import telebot
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- Настройки ---
-API_TOKEN = os.environ.get("API_TOKEN")  # токен бота
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")        # например https://your-app.onrender.com
-USE_POLLING = os.environ.get("USE_POLLING", "false").lower() == "true"
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://your-app.onrender.com
+PORT = int(os.environ.get("PORT", 5000))
 
-if not API_TOKEN:
-    raise RuntimeError("API_TOKEN not set")
+if not TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN not set")
 
-bot = telebot.TeleBot(API_TOKEN)
-app = Flask(__name__)
+# --- Команды ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! ✅ Я работаю на python-telegram-bot")
 
-# --- Хендлеры ---
-@bot.message_handler(commands=["start", "help"])
-def start_handler(message):
-    bot.reply_to(message, "Привет! ✅ Я тестовый бот и уже отвечаю на команды.")
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Echo: {update.message.text}")
 
-@bot.message_handler(func=lambda m: True)
-def echo_handler(message):
-    bot.reply_to(message, f"Echo: {message.text}")
+# --- Запуск ---
+def main():
+    app = Application.builder().token(TOKEN).build()
 
-# --- Webhook маршруты ---
-@app.route("/")
-def index():
-    return "Bot is running!", 200
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    """ Установить вебхук вручную через браузер """
-    if not WEBHOOK_URL:
-        return "WEBHOOK_URL not set", 400
-    bot.remove_webhook()
-    ok = bot.set_webhook(url=WEBHOOK_URL + "/webhook")
-    return ("Webhook set" if ok else "Failed to set webhook"), (200 if ok else 500)
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    if request.headers.get("content-type") == "application/json":
-        json_string = request.get_data().decode("utf-8")
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return "", 200
-    else:
-        abort(403)
-
-# --- Локальный режим (polling) ---
-def start_polling():
-    print("Запуск polling (локально). Нажми Ctrl+C для остановки.")
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    # Render → запускаем как webhook
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=WEBHOOK_URL + "/webhook"
+    )
 
 if __name__ == "__main__":
-    if USE_POLLING:
-        start_polling()
-    else:
-        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    main()
