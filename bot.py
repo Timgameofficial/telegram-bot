@@ -14,11 +14,14 @@ def MainProtokol(s, ts='Запись'):
 TOKEN = os.getenv("API_TOKEN")  # Telegram токен
 ADMIN_ID = os.getenv("ADMIN_ID")  # ID админа
 WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/7589889850:AAGp_If3FCVgZCQDrwM2KaCx6bH9ZpGOPGY"
+import requests
 
 # Регистрируем вебхук у Telegram
 try:
-    r = requests.get(f"https://api.telegram.org/bot7589889850:AAGp_If3FCVgZCQDrwM2KaCx6bH9ZpGOPGY/setWebhook?url=https://telegram-bot-1-g3bw.onrender.com/webhook/7589889850:AAGp_If3FCVgZCQDrwM2KaCx6bH9ZpGOPGY
-")
+    r = requests.get(
+        "https://api.telegram.org/bot7589889850:AAGp_If3FCVgZCQDrwM2KaCx6bH9ZpGOPGY/setWebhook?"
+        "url=https://telegram-bot-1-g3bw.onrender.com/webhook/7589889850:AAGp_If3FCVgZCQDrwM2KaCx6bH9ZpGOPGY"
+    )
     if r.ok:
         print("Webhook успешно установлен!")
     else:
