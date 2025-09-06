@@ -8,10 +8,10 @@ API_TOKEN = os.environ.get("API_TOKEN")  # <-- обязательно устан
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")        # <-- e.g. https://your-app.onrender.com/webhook
 USE_POLLING = os.environ.get("USE_POLLING", "false").lower() == "true"
 
-if not TELEGRAM_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN environment variable is not set")
+if not API_TOKEN:
+    raise RuntimeError("API_TOKEN environment variable is not set")
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(API_TOKEN)
 app = Flask(__name__)
 
 # -------- Bot handlers (тестовые) --------
