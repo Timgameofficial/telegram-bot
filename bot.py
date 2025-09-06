@@ -2,6 +2,7 @@ import time
 import json
 import requests
 import os
+import requests
 
 # ====== Логирование ======
 def MainProtokol(s, ts='Запись'):
@@ -12,6 +13,18 @@ def MainProtokol(s, ts='Запись'):
 # ====== Конфигурация ======
 TOKEN = os.getenv("API_TOKEN")  # Telegram токен
 ADMIN_ID = os.getenv("ADMIN_ID")  # ID админа
+WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/7589889850:AAGp_If3FCVgZCQDrwM2KaCx6bH9ZpGOPGY"
+
+# Регистрируем вебхук у Telegram
+try:
+    r = requests.get(f"https://api.telegram.org/bot7589889850:AAGp_If3FCVgZCQDrwM2KaCx6bH9ZpGOPGY/setWebhook?url=https://telegram-bot-1-g3bw.onrender.com/webhook/7589889850:AAGp_If3FCVgZCQDrwM2KaCx6bH9ZpGOPGY
+")
+    if r.ok:
+        print("Webhook успешно установлен!")
+    else:
+        print("Ошибка при установке webhook:", r.text)
+except Exception as e:
+    print("Не удалось установить webhook:", e)
 
 # ====== Главное меню ======
 MAIN_MENU = ["📢 Про нас", "Графік роботи", "📝 Написати адміну"]
