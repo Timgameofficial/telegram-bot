@@ -21,29 +21,23 @@ def send_message(chat_id, text, reply_markup=None):
     if not r.ok:
         print("Ошибка отправки сообщения:", r.text)
 
-else:
-    # Пересылаем админу любые сообщения (текст, фото, видео, документы, голос)
-    admin_chat_id = ADMIN_ID
-    # Текстовое сообщение
-    if 'text' in message:
-        send_message(admin_chat_id, f"📩 Допис від {first_name}\nID: {chat_id}\nТекст: {message['text']}")
-    # Фото
-    if 'photo' in message:
-        file_id = message['photo'][-1]['file_id']
-        send_photo(admin_chat_id, file_id, f"📩 Допис від {first_name}\nID: {chat_id}")
-    # Видео
-    if 'video' in message:
-        file_id = message['video']['file_id']
-        send_video(admin_chat_id, file_id, f"📩 Допис від {first_name}\nID: {chat_id}")
-    # Документ
-    if 'document' in message:
-        file_id = message['document']['file_id']
-        send_document(admin_chat_id, file_id, f"📩 Допис від {first_name}\nID: {chat_id}")
-    # Голос
-    if 'voice' in message:
-        file_id = message['voice']['file_id']
-        send_voice(admin_chat_id, file_id, f"📩 Допис від {first_name}\nID: {chat_id}")
-    send_message(chat_id, "✅ Повідомлення надіслано адміну!")
+def send_media(chat_id, message):
+    caption = f"📩 Допис від {message['from'].get('first_name','Без имени')}\nID: {chat_id}"
+    markup = {"inline_keyboard":[[{"text":"✉️ Відповісти","callback_data":f"reply_{chat_id}" }]]}
+    if "photo" in message:
+        file_id = message["photo"][-1]["file_id"]
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto", data={"chat_id":ADMIN_ID,"photo":file_id,"caption":caption,"reply_markup":json.dumps(markup)})
+    elif "video" in message:
+        file_id = message["video"]["file_id"]
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendVideo", data={"chat_id":ADMIN_ID,"video":file_id,"caption":caption,"reply_markup":json.dumps(markup)})
+    elif "document" in message:
+        file_id = message["document"]["file_id"]
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument", data={"chat_id":ADMIN_ID,"document":file_id,"caption":caption,"reply_markup":json.dumps(markup)})
+    elif "voice" in message:
+        file_id = message["voice"]["file_id"]
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendVoice", data={"chat_id":ADMIN_ID,"voice":file_id,"caption":caption,"reply_markup":json.dumps(markup)})
+    else:
+        send_message(ADMIN_ID, f"{caption}\n\n{message.get('text','')}", reply_markup=markup)
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
