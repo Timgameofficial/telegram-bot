@@ -66,6 +66,117 @@ def send_message(chat_id, text, reply_markup=None):
         return resp
     except Exception as e:
         MainProtokol(str(e), 'Ошибка сети')
+# --- Вставляемая функция: пересылка сообщений (текст/фото/видео/документы) и подготовка кнопки "Ответить" ---
+def _get_reply_markup_for_admin(user_id: int):
+    return {
+        "inline_keyboard": [
+            [{"text": "✉️ Ответить", "callback_data": f"reply_{user_id}"}]
+        ]
+    }
+
+def forward_user_message_to_admin(message: dict):
+    """
+    Универсальная пересылка сообщения от пользователя админу:
+      - пытаемся forwardMessage (сохраняет оригинал и вложения);
+      - если forwardMessage не прошёл — пересылаем вручную фото/видео/документы по file_id;
+      - в любом случае отправляем админу вспомогательное сообщение с инфо и кнопкой "Ответить";
+      - уведомляем пользователя о результате.
+    Требует существования переменных/функций в основном модуле:
+      - TOKEN (str), ADMIN_ID (int), send_message(chat_id, text, reply_markup=None), MainProtokol(str, tag)
+    """
+    try:
+        # Проверка наличия админа
+        if not ADMIN_ID or ADMIN_ID == 0:
+            send_message(message['chat']['id'], "⚠️ Админ не настроен.")
+            return
+
+        user_chat_id = message['chat']['id']
+        user_first = message['from'].get('first_name', 'Без имени')
+        msg_id = message.get('message_id')
+        # Текст из поля text или caption (если это медиа)
+        text = message.get('text') or message.get('caption') or ''
+        admin_info = f"📩 От {user_first}\nID: {user_chat_id}"
+        if text:
+            admin_info += f"\n\n{text}"
+
+        reply_markup = _get_reply_markup_for_admin(user_chat_id)
+
+        # 1) Сначала пробуем forwardMessage (сохраняет оригинал и вложения)
+        try:
+            fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
+            fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
+            fwd_resp = requests.post(fwd_url, data=fwd_payload)
+            if fwd_resp.ok:
+                # Добавляем к пересланному сообщению вспомогательное сообщение с кнопкой "Ответить" и краткой инфой
+                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
+                send_message(user_chat_id, "✅ Повідомлення надіслано адміну!")
+                return
+            else:
+                MainProtokol(f"forwardMessage failed: {fwd_resp.text}", "ForwardFail")
+        except Exception as e:
+            MainProtokol(str(e), "ForwardException")
+
+        # 2) Если forward не прошёл — пытаемся переслать вложения вручную по file_id
+        media_sent = False
+        r = None
+        try:
+            if 'photo' in message:
+                file_id = message['photo'][-1]['file_id']
+                url = f'https://api.telegram.org/bot{TOKEN}/sendPhoto'
+                payload = {'chat_id': ADMIN_ID, 'photo': file_id, 'caption': admin_info, 'reply_markup': json.dumps(reply_markup)}
+                r = requests.post(url, data=payload)
+                media_sent = (r.ok if r is not None else False)
+            elif 'video' in message:
+                file_id = message['video']['file_id']
+                url = f'https://api.telegram.org/bot{TOKEN}/sendVideo'
+                payload = {'chat_id': ADMIN_ID, 'video': file_id, 'caption': admin_info, 'reply_markup': json.dumps(reply_markup)}
+                r = requests.post(url, data=payload)
+                media_sent = (r.ok if r is not None else False)
+            elif 'document' in message:
+                file_id = message['document']['file_id']
+                url = f'https://api.telegram.org/bot{TOKEN}/sendDocument'
+                payload = {'chat_id': ADMIN_ID, 'document': file_id, 'caption': admin_info, 'reply_markup': json.dumps(reply_markup)}
+                r = requests.post(url, data=payload)
+                media_sent = (r.ok if r is not None else False)
+            elif 'audio' in message:
+                file_id = message['audio']['file_id']
+                url = f'https://api.telegram.org/bot{TOKEN}/sendAudio'
+                payload = {'chat_id': ADMIN_ID, 'audio': file_id, 'caption': admin_info, 'reply_markup': json.dumps(reply_markup)}
+                r = requests.post(url, data=payload)
+                media_sent = (r.ok if r is not None else False)
+            elif 'voice' in message:
+                file_id = message['voice']['file_id']
+                url = f'https://api.telegram.org/bot{TOKEN}/sendVoice'
+                payload = {'chat_id': ADMIN_ID, 'voice': file_id, 'caption': admin_info, 'reply_markup': json.dumps(reply_markup)}
+                r = requests.post(url, data=payload)
+                media_sent = (r.ok if r is not None else False)
+            elif 'animation' in message:
+                file_id = message['animation']['file_id']
+                url = f'https://api.telegram.org/bot{TOKEN}/sendAnimation'
+                payload = {'chat_id': ADMIN_ID, 'animation': file_id, 'caption': admin_info, 'reply_markup': json.dumps(reply_markup)}
+                r = requests.post(url, data=payload)
+                media_sent = (r.ok if r is not None else False)
+            else:
+                # Нет вложений — просто отправляем текст админу
+                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
+                send_message(user_chat_id, "✅ Повідомлення надіслано адміну!")
+                return
+        except Exception as e:
+            MainProtokol(str(e), "SendMediaException")
+
+        # 3) Проверка результата отправки медиа
+        if media_sent:
+            send_message(user_chat_id, "✅ Повідомлення надіслано адміну!")
+        else:
+            # Если не удалось переслать медиа — отправляем админу хотя бы текст и уведомляем пользователя
+            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
+            send_message(user_chat_id, "⚠️ Не вдалося переслати медіа. Адміну надіслано текстове повідомлення.")
+    except Exception as e:
+        MainProtokol(str(e), "ForwardUnhandledException")
+        try:
+            send_message(message['chat']['id'], "⚠️ Сталась помилка при відправці. Спробуйте ще раз.")
+        except Exception:
+            pass
 
 # ====== Хранилище ожидания ответа от админа ======
 waiting_for_admin = {}
