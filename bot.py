@@ -3,6 +3,7 @@ import time
 import json
 import requests
 import threading
+import traceback
 from flask import Flask, request
 
 # ====== Логирование ======
@@ -13,6 +14,45 @@ def MainProtokol(s, ts='Запись'):
             f.write(f"{dt};{ts};{s}\n")
     except Exception as e:
         print("Ошибка записи в лог:", e)
+
+# ====== Максимально крутой обработчик ошибок ======
+def cool_error_handler(exc, context=""):
+    exc_type = type(exc).__name__
+    tb_str = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    msg = (
+        f"\n{'='*40}\n"
+        f"[CRITICAL ERROR]: {exc_type}\n"
+        f"Context: {context}\n"
+        f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Traceback:\n{tb_str}\n"
+        f"{'='*40}\n"
+    )
+    # Запись в лог файл
+    try:
+        with open('critical_errors.log', 'a', encoding='utf-8') as f:
+            f.write(msg)
+    except Exception as e:
+        print("Ошибка при записи критической ошибки:", e)
+    # Также пишем в основной лог
+    MainProtokol(msg, ts='CRITICAL ERROR')
+    # Выводим в консоль
+    print(msg)
+    # Если админ задан, отправляем в Telegram админу
+    admin_id = int(os.getenv("ADMIN_ID", "0"))
+    token = os.getenv("API_TOKEN")
+    if admin_id and token:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data={
+                    "chat_id": admin_id,
+                    "text": f"⚠️ Критическая ошибка!\nТип: {exc_type}\nContext: {context}\n\n{str(exc)}",
+                    "disable_web_page_preview": True
+                },
+                timeout=5
+            )
+        except Exception as e:
+            print("Ошибка при отправке ошибки админу:", e)
 
 # ====== Отладка времени в консоль (фоновый поток, каждые 5 минут) ======
 def time_debugger():
@@ -58,7 +98,7 @@ def set_webhook():
         else:
             print("Ошибка при установке webhook:", r.text)
     except Exception as e:
-        print("Не удалось установить webhook:", e)
+        cool_error_handler(e, context="set_webhook")
 
 set_webhook()
 
@@ -77,6 +117,7 @@ def send_message(chat_id, text, reply_markup=None):
             MainProtokol(resp.text, 'Ошибка отправки')
         return resp
     except Exception as e:
+        cool_error_handler(e, context="send_message")
         MainProtokol(str(e), 'Ошибка сети')
 
 def _get_reply_markup_for_admin(user_id: int):
@@ -113,6 +154,7 @@ def forward_user_message_to_admin(message: dict):
             else:
                 MainProtokol(f"forwardMessage failed: {fwd_resp.text}", "ForwardFail")
         except Exception as e:
+            cool_error_handler(e, context="forward_user_message_to_admin: forwardMessage")
             MainProtokol(str(e), "ForwardException")
 
         media_sent = False
@@ -145,6 +187,7 @@ def forward_user_message_to_admin(message: dict):
                 send_message(user_chat_id, "✅ Повідомлення надіслано адміну!")
                 return
         except Exception as e:
+            cool_error_handler(e, context="forward_user_message_to_admin: sendMedia")
             MainProtokol(str(e), "SendMediaException")
 
         if media_sent:
@@ -153,17 +196,23 @@ def forward_user_message_to_admin(message: dict):
             send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
             send_message(user_chat_id, "⚠️ Не вдалося переслати медіа. Адміну надіслано текстове повідомлення.")
     except Exception as e:
+        cool_error_handler(e, context="forward_user_message_to_admin: unhandled")
         MainProtokol(str(e), "ForwardUnhandledException")
         try:
             send_message(message['chat']['id'], "⚠️ Сталась помилка при відправці. Спробуйте ще раз.")
-        except Exception:
-            pass
+        except Exception as err:
+            cool_error_handler(err, context="forward_user_message_to_admin: notify user")
 
 # ====== Хранилище ожидания ответа от админа ======
 waiting_for_admin = {}
 
 # ====== Flask ======
 app = Flask(__name__)
+
+@app.errorhandler(Exception)
+def flask_global_error_handler(e):
+    cool_error_handler(e, context="Flask global error handler")
+    return "Внутренняя ошибка сервера. Администратору отправлено уведомление.", 500
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
@@ -185,6 +234,7 @@ def webhook():
                         f"✍️ Введите ответ для пользователя {user_id}:"
                     )
                 except Exception as e:
+                    cool_error_handler(e, context="webhook: callback_query reply_")
                     MainProtokol(str(e), 'Ошибка callback reply')
             elif data == "about":
                 send_message(
@@ -262,16 +312,27 @@ def webhook():
         return "ok", 200
 
     except Exception as e:
+        cool_error_handler(e, context="webhook - outer")
         MainProtokol(str(e), 'Ошибка webhook')
         return "ok", 200
 
 @app.route('/', methods=['GET'])
 def index():
-    MainProtokol('Кто-то зашел на сайт')
-    return "Бот работает", 200
+    try:
+        MainProtokol('Кто-то зашел на сайт')
+        return "Бот работает", 200
+    except Exception as e:
+        cool_error_handler(e, context="index route")
+        return "Error", 500
 
 if __name__ == "__main__":
     # Запуск отладчика времени в отдельном потоке (каждые 5 минут)
-    threading.Thread(target=time_debugger, daemon=True).start()
+    try:
+        threading.Thread(target=time_debugger, daemon=True).start()
+    except Exception as e:
+        cool_error_handler(e, context="main: start time_debugger")
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    try:
+        app.run(host="0.0.0.0", port=port)
+    except Exception as e:
+        cool_error_handler(e, context="main: app.run")
