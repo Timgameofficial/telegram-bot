@@ -2,6 +2,7 @@ import os
 import time
 import json
 import requests
+import threading
 from flask import Flask, request
 
 # ====== Логирование ======
@@ -12,6 +13,33 @@ def MainProtokol(s, ts='Запись'):
             f.write(f"{dt};{ts};{s}\n")
     except Exception as e:
         print("Ошибка записи в лог:", e)
+
+# ====== Отладка времени в консоль (фоновый поток, каждые 5 минут) ======
+def time_debugger():
+    while True:
+        print("[DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
+        time.sleep(300)  # 5 минут
+
+# ====== Главное меню (reply-кнопки) ======
+MAIN_MENU = [
+    "📢 Про нас",
+    "Графік роботи",
+    "📝 Написати адміну"
+]
+
+def get_reply_buttons():
+    return {
+        "keyboard": [
+            [{"text": "📢 Про нас"}],
+            [{"text": "Графік роботи"}],
+            [{"text": "📝 Написати адміну"}]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
+
+# ====== Хранилище для ожидания сообщения админу ======
+waiting_for_admin_message = set()
 
 # ====== Конфигурация ======
 TOKEN = os.getenv("API_TOKEN")
@@ -34,22 +62,6 @@ def set_webhook():
 
 set_webhook()
 
-# ====== Главное меню ======
-MAIN_MENU = [
-    "📢 Про нас",
-    "Графік роботи",
-    "📝 Написати адміну"
-]
-
-def get_inline_buttons():
-    return {
-        "inline_keyboard": [
-            [{"text": "📢 Про нас", "callback_data": "about"}],
-            [{"text": "Графік роботи", "callback_data": "schedule"}],
-            [{"text": "📝 Написати адміну", "callback_data": "write_admin"}]
-        ]
-    }
-
 # ====== Отправка сообщений ======
 def send_message(chat_id, text, reply_markup=None):
     url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
@@ -67,7 +79,6 @@ def send_message(chat_id, text, reply_markup=None):
     except Exception as e:
         MainProtokol(str(e), 'Ошибка сети')
 
-# --- Вставляемая функция: пересылка сообщений (текст/фото/видео/документы) и подготовка кнопки "Ответить" ---
 def _get_reply_markup_for_admin(user_id: int):
     return {
         "inline_keyboard": [
@@ -76,11 +87,7 @@ def _get_reply_markup_for_admin(user_id: int):
     }
 
 def forward_user_message_to_admin(message: dict):
-    """
-    Улучшенная пересылка сообщений с фото/видео/документами и кнопкой "Ответить".
-    """
     try:
-        # Проверка наличия админа
         if not ADMIN_ID or ADMIN_ID == 0:
             send_message(message['chat']['id'], "⚠️ Админ не настроен.")
             return
@@ -88,7 +95,6 @@ def forward_user_message_to_admin(message: dict):
         user_chat_id = message['chat']['id']
         user_first = message['from'].get('first_name', 'Без имени')
         msg_id = message.get('message_id')
-        # Текст из поля text или caption (если это медиа)
         text = message.get('text') or message.get('caption') or ''
         admin_info = f"📩 От {user_first}\nID: {user_chat_id}"
         if text:
@@ -96,7 +102,6 @@ def forward_user_message_to_admin(message: dict):
 
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
 
-        # 1) Пробуем forwardMessage (сохраняет оригинал и вложения)
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
             fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
@@ -110,7 +115,6 @@ def forward_user_message_to_admin(message: dict):
         except Exception as e:
             MainProtokol(str(e), "ForwardException")
 
-        # 2) Если forward не прошёл — пересылаем вложения вручную по file_id
         media_sent = False
         try:
             media_types = [
@@ -135,20 +139,17 @@ def forward_user_message_to_admin(message: dict):
                     media_sent = resp.ok
                     if not media_sent:
                         MainProtokol(f'{endpoint} failed: {resp.text}', "MediaSendFail")
-                    break  # отправлено что-то одно — дальше не идём
+                    break
             else:
-                # Нет вложений — просто отправляем текст админу
                 send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
                 send_message(user_chat_id, "✅ Повідомлення надіслано адміну!")
                 return
         except Exception as e:
             MainProtokol(str(e), "SendMediaException")
 
-        # 3) Проверка результата отправки медиа
         if media_sent:
             send_message(user_chat_id, "✅ Повідомлення надіслано адміну!")
         else:
-            # Если не удалось переслать медиа — отправляем админу хотя бы текст и уведомляем пользователя
             send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
             send_message(user_chat_id, "⚠️ Не вдалося переслати медіа. Адміну надіслано текстове повідомлення.")
     except Exception as e:
@@ -199,6 +200,7 @@ def webhook():
                     "Адмін може спати, але обов’язково відповість 😉"
                 )
             elif data == "write_admin":
+                waiting_for_admin_message.add(chat_id)
                 send_message(
                     chat_id,
                     "✍️ Напишіть сообщение админу (текст/фото/документ):"
@@ -212,17 +214,19 @@ def webhook():
             text = message.get('text', '')
             first_name = message['from'].get('first_name', 'Без имени')
 
+            # Ответ админа пользователю
             if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
                 user_id = waiting_for_admin.pop(ADMIN_ID)
                 send_message(user_id, f"💬 Админ:\n{text}")
                 send_message(ADMIN_ID, f"✅ Ответ отправлен пользователю {user_id}")
                 return "ok", 200
 
+            # Главное меню как Reply-кнопки
             if text == '/start':
                 send_message(
                     chat_id,
                     "Ласкаво просимо! Выберите действие в меню 👇",
-                    reply_markup=get_inline_buttons()
+                    reply_markup=get_reply_buttons()
                 )
             elif text in MAIN_MENU:
                 if text == "📢 Про нас":
@@ -239,13 +243,21 @@ def webhook():
                         "Адмін може спати, але обов’язково відповість 😉"
                     )
                 elif text == "📝 Написати адміну":
+                    waiting_for_admin_message.add(chat_id)
                     send_message(
                         chat_id,
                         "✍️ Напишіть сообщение админу (текст/фото/документ):"
                     )
             else:
-                # Вот здесь вызываем новую функцию пересылки для любого пользовательского сообщения
-                forward_user_message_to_admin(message)
+                # Принимаем сообщение админу только если была нажата соответствующая кнопка
+                if chat_id in waiting_for_admin_message:
+                    forward_user_message_to_admin(message)
+                    waiting_for_admin_message.remove(chat_id)
+                else:
+                    send_message(
+                        chat_id,
+                        "Щоб написати адміну, спочатку натисніть кнопку '📝 Написати адміну' у меню."
+                    )
 
         return "ok", 200
 
@@ -259,5 +271,7 @@ def index():
     return "Бот работает", 200
 
 if __name__ == "__main__":
+    # Запуск отладчика времени в отдельном потоке (каждые 5 минут)
+    threading.Thread(target=time_debugger, daemon=True).start()
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
