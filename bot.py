@@ -46,7 +46,7 @@ def cool_error_handler(exc, context=""):
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data={
                     "chat_id": admin_id,
-                    "text": f"⚠️ Критическая ошибка!\nТип: {exc_type}\nContext: {context}\n\n{str(exc)}",
+                    "text": f"⚠️ Critically Error!\nТип: {exc_type}\nContext: {context}\n\n{str(exc)}",
                     "disable_web_page_preview": True
                 },
                 timeout=5
@@ -63,7 +63,7 @@ def time_debugger():
 # ====== Главное меню (reply-кнопки) ======
 MAIN_MENU = [
     "📢 Про нас",
-    "Графік роботи",
+    "🕰️Графік роботи",
     "📝 Написати адміну"
 ]
 
@@ -71,7 +71,7 @@ def get_reply_buttons():
     return {
         "keyboard": [
             [{"text": "📢 Про нас"}],
-            [{"text": "Графік роботи"}],
+            [{"text": "🕰️Графік роботи"}],
             [{"text": "📝 Написати адміну"}]
         ],
         "resize_keyboard": True,
