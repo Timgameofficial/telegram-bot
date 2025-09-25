@@ -123,7 +123,7 @@ def send_message(chat_id, text, reply_markup=None):
 def _get_reply_markup_for_admin(user_id: int):
     return {
         "inline_keyboard": [
-            [{"text": "✉️ Ответить", "callback_data": f"reply_{user_id}"}]
+            [{"text": "✉️ Відповісти", "callback_data": f"reply_{user_id}"}]
         ]
     }
 
@@ -231,7 +231,7 @@ def webhook():
                     waiting_for_admin[ADMIN_ID] = user_id
                     send_message(
                         ADMIN_ID,
-                        f"✍️ Введите ответ для пользователя {user_id}:"
+                        f"✍️ Введіть відповідь для користувача {user_id}:"
                     )
                 except Exception as e:
                     cool_error_handler(e, context="webhook: callback_query reply_")
@@ -253,7 +253,7 @@ def webhook():
                 waiting_for_admin_message.add(chat_id)
                 send_message(
                     chat_id,
-                    "✍️ Напишіть сообщение админу (текст/фото/документ):"
+                    "✍️ Напишіть повідомлення адміну (текст/фото/документ):"
                 )
             return "ok", 200
 
@@ -267,15 +267,15 @@ def webhook():
             # Ответ админа пользователю
             if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
                 user_id = waiting_for_admin.pop(ADMIN_ID)
-                send_message(user_id, f"💬 Админ:\n{text}")
-                send_message(ADMIN_ID, f"✅ Ответ отправлен пользователю {user_id}")
+                send_message(user_id, f"💬 Адмін:\n{text}")
+                send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
                 return "ok", 200
 
             # Главное меню как Reply-кнопки
             if text == '/start':
                 send_message(
                     chat_id,
-                    "Ласкаво просимо! Выберите действие в меню 👇",
+                    "Ласкаво просимо! Виберіть дію в меню 👇",
                     reply_markup=get_reply_buttons()
                 )
             elif text in MAIN_MENU:
@@ -296,7 +296,7 @@ def webhook():
                     waiting_for_admin_message.add(chat_id)
                     send_message(
                         chat_id,
-                        "✍️ Напишіть сообщение админу (текст/фото/документ):"
+                        "✍️ Напишіть повідомлення адміну (текст/фото/документ):"
                     )
             else:
                 # Принимаем сообщение админу только если была нажата соответствующая кнопка
