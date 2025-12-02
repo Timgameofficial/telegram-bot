@@ -1,4 +1,3 @@
-# Исправленная версия: корректная обработка HTTPException в глобальном обработчике Flask
 import os
 import time
 import json
@@ -6,41 +5,14 @@ import requests
 import threading
 import traceback
 import datetime
-from flask import Flask, request, abort
+from flask import Flask, request
 
-from werkzeug.exceptions import HTTPException
-
-from PIL import Image, ImageDraw, ImageFont
-import io
-
-# ====== Конфигурация и проверки ======
-TOKEN = os.getenv("API_TOKEN")
-try:
-    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-except Exception:
-    ADMIN_ID = 0
-
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")  # e.g. "https://yourdomain.com"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # лучше задать секретный путь
-if not WEBHOOK_SECRET and TOKEN:
-    # fallback — НЕ рекомендуется держать полный токен; лучше задать WEBHOOK_SECRET явно
-    WEBHOOK_SECRET = "hook-" + TOKEN[:10]
-
-if not TOKEN:
-    print("WARNING: API_TOKEN not set. Bot will not be able to call Telegram API.")
-
-WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}" if WEBHOOK_SECRET else "/webhook"
-
-REQUEST_TIMEOUT = 6  # seconds
-
-# ====== Логирование ======
-LOG_LOCK = threading.Lock()
+# ====== Логування ======
 def MainProtokol(s, ts='Запис'):
-    dt = time.strftime('%d.%m.%Y %H:%M:%S')
+    dt = time.strftime('%d.%m.%Y %H:%M:') + '00'
     try:
-        with LOG_LOCK:
-            with open('log.txt', 'a', encoding='utf-8') as f:
-                f.write(f"{dt};{ts};{s}\n")
+        with open('log.txt', 'a', encoding='utf-8') as f:
+            f.write(f"{dt};{ts};{s}\n")
     except Exception as e:
         print("Помилка запису в лог:", e)
 
@@ -48,31 +20,30 @@ def MainProtokol(s, ts='Запис'):
 def cool_error_handler(exc, context=""):
     exc_type = type(exc).__name__
     tb_str = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    # Можно фильтровать потенциально чувствительные данные здесь (например, части TOKEN)
     msg = (
         f"\n{'='*40}\n"
-        f"[КРИТИЧНА ПОМИЛКА]: {exc_type}\n"
+        f"[CRITICAL ERROR]: {exc_type}\n"
         f"Контекст: {context}\n"
         f"Час: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Traceback:\n{tb_str}\n"
         f"{'='*40}\n"
     )
     try:
-        with LOG_LOCK:
-            with open('critical_errors.log', 'a', encoding='utf-8') as f:
-                f.write(msg)
+        with open('critical_errors.log', 'a', encoding='utf-8') as f:
+            f.write(msg)
     except Exception as e:
         print("Помилка при запису критичної помилки:", e)
-    MainProtokol(msg, ts='КРИТИЧНА ПОМИЛКА')
+    MainProtokol(msg, ts='CRITICAL ERROR')
     print(msg)
-    if ADMIN_ID and TOKEN:
+    admin_id = int(os.getenv("ADMIN_ID", "0"))
+    token = os.getenv("API_TOKEN")
+    if admin_id and token:
         try:
-            safe_text = f"⚠️ Критична помилка!\nТип: {exc_type}\nКонтекст: {context}\n\n{str(exc)}"
             requests.post(
-                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                f"https://api.telegram.org/bot{token}/sendMessage",
                 data={
-                    "chat_id": ADMIN_ID,
-                    "text": safe_text,
+                    "chat_id": admin_id,
+                    "text": f"⚠️ Критична помилка!\nТип: {exc_type}\nКонтекст: {context}\n\n{str(exc)}",
                     "disable_web_page_preview": True
                 },
                 timeout=5
@@ -80,11 +51,13 @@ def cool_error_handler(exc, context=""):
         except Exception as e:
             print("Помилка при надсиланні помилки адміну:", e)
 
+# ====== Відладка часу в консоль (фоновий потік, кожні 5 хвилин) ======
 def time_debugger():
     while True:
         print("[DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
         time.sleep(300)
 
+# ====== Головне меню (reply-кнопки) ======
 MAIN_MENU = [
     "📢 Про нас",
     "🕰️ Графік роботи",
@@ -93,18 +66,18 @@ MAIN_MENU = [
 ]
 
 def get_reply_buttons():
-    # Telegram дозволяє або строки, або об'єкти KeyboardButton; используем simpler strings
     return {
         "keyboard": [
-            ["📢 Про нас"],
-            ["🕰️ Графік роботи"],
-            ["📝 Повідомити про подію"],
-            ["📊 Статистика подій"]
+            [{"text": "📢 Про нас"}],
+            [{"text": "🕰️ Графік роботи"}],
+            [{"text": "📝 Повідомити про подію"}],
+            [{"text": "📊 Статистика подій"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
     }
 
+# ====== Категорії подій ======
 ADMIN_SUBCATEGORIES = [
     "🚗 ДТП",
     "🔪 Вбивство",
@@ -116,77 +89,66 @@ ADMIN_SUBCATEGORIES = [
 
 def get_admin_subcategory_buttons():
     return {
-        "keyboard": [[cat] for cat in ADMIN_SUBCATEGORIES],
+        "keyboard": [[{"text": cat}] for cat in ADMIN_SUBCATEGORIES],
         "resize_keyboard": True,
         "one_time_keyboard": True
     }
 
+# ====== Хранилище для статусу вибору категорії користувача ======
 waiting_for_admin_message = set()
 user_admin_category = {}
-waiting_for_admin = {}
 
+# ====== Хранилище подій для статистики ======
 EVENTS_FILE = 'events.json'
-events_lock = threading.Lock()
 
 def save_event(category):
     try:
         now_iso = datetime.datetime.now().isoformat()
-        with events_lock:
-            events = []
-            if os.path.exists(EVENTS_FILE):
-                try:
-                    with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
-                        events = json.load(f)
-                except Exception:
-                    # если файл поврежден — перезаписать
-                    events = []
-            events.append({"category": category, "dt": now_iso})
-            with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(events, f, ensure_ascii=False)
+        events = []
+        if os.path.exists(EVENTS_FILE):
+            with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
+                events = json.load(f)
+        events.append({"category": category, "dt": now_iso})
+        with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(events, f)
     except Exception as e:
         cool_error_handler(e, "save_event")
 
 def get_stats():
     res = {cat: {'week': 0, 'month': 0} for cat in ADMIN_SUBCATEGORIES}
     now = datetime.datetime.now()
-    with events_lock:
-        if os.path.exists(EVENTS_FILE):
-            try:
-                with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-                for ev in events:
-                    cat = ev.get('category')
-                    dt_str = ev.get('dt')
-                    try:
-                        dt_ev = datetime.datetime.fromisoformat(dt_str)
-                    except Exception:
-                        continue
-                    days_diff = (now - dt_ev).days
+    if os.path.exists(EVENTS_FILE):
+        try:
+            with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
+                events = json.load(f)
+            for ev in events:
+                cat = ev['category']
+                dt_ev = datetime.datetime.fromisoformat(ev['dt'])
+                if (now - dt_ev).days < 7:
                     if cat in res:
-                        if days_diff < 7:
-                            res[cat]['week'] += 1
-                        if days_diff < 30:
-                            res[cat]['month'] += 1
-                return res
-            except Exception as e:
-                cool_error_handler(e, "get_stats")
-                return None
-        else:
+                        res[cat]['week'] += 1
+                if (now - dt_ev).days < 30:
+                    if cat in res:
+                        res[cat]['month'] += 1
             return res
+        except Exception as e:
+            cool_error_handler(e, "get_stats")
+            return None
+    else:
+        return res
 
 def clear_stats_if_month_passed():
     now = datetime.datetime.now()
-    with events_lock:
-        if os.path.exists(EVENTS_FILE):
-            try:
-                with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-                events = [ev for ev in events
-                         if (now - datetime.datetime.fromisoformat(ev['dt'])).days < 30]
-                with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(events, f, ensure_ascii=False)
-            except Exception as e:
-                cool_error_handler(e, "clear_stats_if_month_passed")
+    if os.path.exists(EVENTS_FILE):
+        try:
+            with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
+                events = json.load(f)
+            events = [ev for ev in events
+                     if (now - datetime.datetime.fromisoformat(ev['dt'])).days < 30]
+            with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(events, f)
+        except Exception as e:
+            cool_error_handler(e, "clear_stats_if_month_passed")
 
 def stats_autoclear_daemon():
     while True:
@@ -194,98 +156,46 @@ def stats_autoclear_daemon():
             clear_stats_if_month_passed()
         except Exception as e:
             cool_error_handler(e, "stats_autoclear_daemon")
-        time.sleep(3600)
+        time.sleep(3600)  # кожні 60 хвилин
 
-# === Генератор зображення зі статистикою ===
-FONT_PATH = "DejaVuSerif-BoldItalic.ttf"
+# ====== Конфігурація ======
+TOKEN = os.getenv("API_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{TOKEN}"
 
-def generate_stats_image(stats):
-    width, margin, header_height = 600, 40, 80
-    line_height = 48
-    background = (255, 255, 255)
-    items_count = len(stats)
-    total_height = header_height + (line_height+5)*items_count + margin + 60
-
-    img = Image.new('RGB', (width, total_height), color=background)
-    draw = ImageDraw.Draw(img)
-
+# ====== Встановлення webhook ======
+def set_webhook():
     try:
-        font_header = ImageFont.truetype(FONT_PATH, 15)
-        font_logo = ImageFont.truetype(FONT_PATH, 30)
-        font_line = ImageFont.truetype(FONT_PATH, 15)
-    except Exception:
-        font_header = ImageFont.load_default()
-        font_logo = ImageFont.load_default()
-        font_line = ImageFont.load_default()
-
-    logo_text = "Spilkuvach 2.0"
-    try:
-        logo_bbox = draw.textbbox((0, 0), logo_text, font=font_logo)
-        logo_width = logo_bbox[2] - logo_bbox[0]
-        draw.text(((width - logo_width)//2, 16), logo_text, fill=(55, 93, 194), font=font_logo)
-    except Exception:
-        draw.text((margin, 16), logo_text, fill=(55, 93, 194), font=font_logo)
-
-    header_text = "Статистика подій"
-    try:
-        header_bbox = draw.textbbox((0, 0), header_text, font=font_header)
-        header_width = header_bbox[2] - header_bbox[0]
-        draw.text(((width-header_width)//2, 60), header_text, fill=(33,53,85), font=font_header)
-    except Exception:
-        draw.text((margin, 60), header_text, fill=(33,53,85), font=font_header)
-
-    y = header_height + margin
-    for cat, v in stats.items():
-        line = f"{cat}:\n   За 7 днів — {v['week']}   За 30 днів — {v['month']}"
-        draw.text((margin, y), line, fill=(44,62,80), font=font_line)
-        y += line_height + 14
-
-    draw.line([(margin, y+5), (width-margin, y+5)], fill=(220,220,220), width=3)
-
-    img_bytes = io.BytesIO()
-    img.save(img_bytes, format='PNG')
-    img_bytes.seek(0)
-    return img_bytes
-
-def send_photo(chat_id, photo_bytes, caption=None):
-    if not TOKEN:
-        MainProtokol("TOKEN не задан", 'Помилка надсилання фото')
-        return None
-    url = f'https://api.telegram.org/bot{TOKEN}/sendPhoto'
-    files = {'photo': ('stats.png', photo_bytes, 'image/png')}
-    data = {'chat_id': chat_id}
-    if caption:
-        data['caption'] = caption
-    try:
-        resp = requests.post(url, files=files, data=data, timeout=REQUEST_TIMEOUT)
-        if not resp.ok:
-            MainProtokol(resp.text, 'Помилка надсилання фото')
-        return resp
+        r = requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+            params={"url": WEBHOOK_URL}
+        )
+        if r.ok:
+            print("Webhook успішно встановлено!")
+        else:
+            print("Помилка при встановленні webhook:", r.text)
     except Exception as e:
-        cool_error_handler(e, context="send_photo")
-        MainProtokol(str(e), 'Помилка мережі')
-        return None
+        cool_error_handler(e, context="set_webhook")
 
+set_webhook()
+
+# ====== Надсилання повідомлень ======
 def send_message(chat_id, text, reply_markup=None):
-    if not TOKEN:
-        MainProtokol("TOKEN не задан", 'Помилка надсилання')
-        return None
     url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
     payload = {
         'chat_id': chat_id,
         'text': text
     }
     if reply_markup:
-        payload['reply_markup'] = json.dumps(reply_markup, ensure_ascii=False)
+        payload['reply_markup'] = json.dumps(reply_markup)
     try:
-        resp = requests.post(url, data=payload, timeout=REQUEST_TIMEOUT)
+        resp = requests.post(url, data=payload)
         if not resp.ok:
             MainProtokol(resp.text, 'Помилка надсилання')
         return resp
     except Exception as e:
         cool_error_handler(e, context="send_message")
         MainProtokol(str(e), 'Помилка мережі')
-        return None
 
 def _get_reply_markup_for_admin(user_id: int):
     return {
@@ -296,8 +206,9 @@ def _get_reply_markup_for_admin(user_id: int):
 
 def forward_user_message_to_admin(message):
     try:
-        if not ADMIN_ID:
-            return False
+        if not ADMIN_ID or ADMIN_ID == 0:
+            send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
+            return
 
         user_chat_id = message['chat']['id']
         user_first = message['from'].get('first_name', 'Без імені')
@@ -315,17 +226,19 @@ def forward_user_message_to_admin(message):
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
             fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
-            fwd_resp = requests.post(fwd_url, data=fwd_payload, timeout=REQUEST_TIMEOUT)
+            fwd_resp = requests.post(fwd_url, data=fwd_payload)
             if fwd_resp.ok:
                 send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
-                return True
+                send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
+                return
             else:
                 MainProtokol(f"forwardMessage failed: {fwd_resp.text}", "ForwardFail")
         except Exception as e:
             cool_error_handler(e, context="forward_user_message_to_admin: forwardMessage")
+            MainProtokol(str(e), "ForwardException")
 
+        media_sent = False
         try:
-            media_sent = False
             media_types = [
                 ('photo', 'sendPhoto', 'photo'),
                 ('video', 'sendVideo', 'video'),
@@ -342,48 +255,182 @@ def forward_user_message_to_admin(message):
                         'chat_id': ADMIN_ID,
                         payload_key: file_id,
                         'caption': admin_info,
-                        'reply_markup': json.dumps(reply_markup, ensure_ascii=False)
+                        'reply_markup': json.dumps(reply_markup)
                     }
-                    resp = requests.post(url, data=payload, timeout=REQUEST_TIMEOUT)
-                    if resp.ok:
-                        media_sent = True
-                        break
-                    else:
+                    resp = requests.post(url, data=payload)
+                    media_sent = resp.ok
+                    if not media_sent:
                         MainProtokol(f'{endpoint} failed: {resp.text}', "MediaSendFail")
-            if media_sent:
-                return True
+                    break
             else:
                 send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
-                return True
+                send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
+                return
         except Exception as e:
             cool_error_handler(e, context="forward_user_message_to_admin: sendMedia")
-            return False
+            MainProtokol(str(e), "SendMediaException")
 
+        if media_sent:
+            send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
+        else:
+            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
+            send_message(user_chat_id, "⚠️ Не вдалося переслати медіа. Адміністратору надіслано текстове повідомлення.")
     except Exception as e:
         cool_error_handler(e, context="forward_user_message_to_admin: unhandled")
-        return False
+        MainProtokol(str(e), "ForwardUnhandledException")
+        try:
+            send_message(message['chat']['id'], "⚠️ Виникла помилка при надсиланні. Спробуйте ще раз.")
+        except Exception as err:
+            cool_error_handler(err, context="forward_user_message_to_admin: notify user")
+
+waiting_for_admin = {}
 
 app = Flask(__name__)
 
 @app.errorhandler(Exception)
 def flask_global_error_handler(e):
-    # Если это HTTPException (например, abort(403)), не считаем это критической ошибкой:
-    if isinstance(e, HTTPException):
-        # Коротко логируем, но НЕ вызываем cool_error_handler и НЕ шлём админу
-        MainProtokol(f"HTTPException: {e}", ts='HTTP_EXCEPTION')
-        # Возвращаем стандартный ответ для HTTPException
-        return e.get_response()
-    # Для всех остальных исключений — нормальная критическая обработка
     cool_error_handler(e, context="Flask global error handler")
     return "Внутрішня помилка сервера. Адміністратору надіслано повідомлення.", 500
 
-# Маршрут webhook - параметризированный путь, проверяем токен внутри
-@app.route('/webhook/<token>', methods=['POST'])
-def webhook_with_token(token):
-    if not TOKEN or token != WEBHOOK_SECRET:
-        # Если token не совпадает — отказ
-        abort(403)
-    return webhook()
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+def webhook():
+    try:
+        data_raw = request.get_data(as_text=True)
+        update = json.loads(data_raw)
 
-# ... остальной код (webhook, send_message и т.д.) остаётся без изменений ...
-# Для компактности здесь опущён дублирующийся код из оригинала; в вашей копии вставьте остальные функции / маршруты без изменений.
+        if 'callback_query' in update:
+            call = update['callback_query']
+            chat_id = call['from']['id']
+            data = call['data']
+
+            if data.startswith("reply_") and chat_id == ADMIN_ID:
+                try:
+                    user_id = int(data.split("_")[1])
+                    waiting_for_admin[ADMIN_ID] = user_id
+                    send_message(
+                        ADMIN_ID,
+                        f"✍️ Введіть відповідь для користувача {user_id}:"
+                    )
+                except Exception as e:
+                    cool_error_handler(e, context="webhook: callback_query reply_")
+                    MainProtokol(str(e), 'Помилка callback reply')
+            elif data == "about":
+                send_message(
+                    chat_id,
+                    "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\n"
+                    "Більше про нас: https://www.instagram.com/p/DOEpwuEiLuC/"
+                )
+            elif data == "schedule":
+                send_message(
+                    chat_id,
+                    "Наш бот приймає повідомлення 24/7! Адміністратор завжди розглядає ваші звернення."
+                )
+            elif data == "write_admin":
+                waiting_for_admin_message.add(chat_id)
+                send_message(
+                    chat_id,
+                    "✍️ Напишіть повідомлення адміністратору (текст/фото/документ):"
+                )
+            return "ok", 200
+
+        if 'message' in update:
+            message = update['message']
+            chat_id = message['chat']['id']
+            from_id = message['from']['id']
+            text = message.get('text', '')
+            first_name = message['from'].get('first_name', 'Без імені')
+
+            # Відповідь адміністратора користувачу
+            if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
+                user_id = waiting_for_admin.pop(ADMIN_ID)
+                send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
+                send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
+                return "ok", 200
+
+            # Головне меню як reply-кнопки
+            if text == '/start':
+                send_message(
+                    chat_id,
+                    "Вітаємо! 👋\nОберіть потрібну дію у меню нижче:",
+                    reply_markup=get_reply_buttons()
+                )
+            elif text in MAIN_MENU:
+                if text == "📢 Про нас":
+                    send_message(
+                        chat_id,
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\n"
+                        "Дізнатись більше: https://www.instagram.com/p/DOEpwuEiLuC/"
+                    )
+                elif text == "🕰️ Графік роботи":
+                    send_message(
+                        chat_id,
+                        "Ми працюємо цілодобово.\nЗвертайтесь у будь-який час — відповідаємо максимально швидко."
+                    )
+                elif text == "📝 Повідомити про подію":
+                    send_message(
+                        chat_id,
+                        "Оберіть тип події, яку хочете повідомити:",
+                        reply_markup=get_admin_subcategory_buttons()
+                    )
+                elif text == "📊 Статистика подій":
+                    stats = get_stats()
+                    if stats:
+                        msg = "Статистика за 7 та 30 днів:\n"
+                        for cat in ADMIN_SUBCATEGORIES:
+                            msg += f"{cat}: за 7 днів — {stats[cat]['week']}, за 30 днів — {stats[cat]['month']}\n"
+                        send_message(chat_id, msg)
+                    else:
+                        send_message(chat_id, "Наразі статистика недоступна.")
+            elif text in ADMIN_SUBCATEGORIES:
+                user_admin_category[chat_id] = text
+                waiting_for_admin_message.add(chat_id)
+                send_message(
+                    chat_id,
+                    f"Будь ласка, опишіть деталі події \"{text}\" (можна прикріпити фото чи файл):"
+                )
+            else:
+                if chat_id in waiting_for_admin_message:
+                    forward_user_message_to_admin(message)
+                    waiting_for_admin_message.remove(chat_id)
+                    user_admin_category.pop(chat_id, None)
+                    send_message(
+                        chat_id,
+                        "Ваша інформація передана. Дякуємо за активну позицію! Якщо потрібно — звертайтесь ще.",
+                        reply_markup=get_reply_buttons()
+                    )
+                else:
+                    send_message(
+                        chat_id,
+                        "Щоб повідомити адміна, спочатку натисніть кнопку «📝 Повідомити про подію» в меню.",
+                        reply_markup=get_reply_buttons()
+                    )
+        return "ok", 200
+
+    except Exception as e:
+        cool_error_handler(e, context="webhook - outer")
+        MainProtokol(str(e), 'Помилка webhook')
+        return "ok", 200
+
+@app.route('/', methods=['GET'])
+def index():
+    try:
+        MainProtokol('Відвідання сайту')
+        return "Бот працює", 200
+    except Exception as e:
+        cool_error_handler(e, context="index route")
+        return "Error", 500
+
+if __name__ == "__main__":
+    try:
+        threading.Thread(target=time_debugger, daemon=True).start()
+    except Exception as e:
+        cool_error_handler(e, context="main: start time_debugger")
+    try:
+        threading.Thread(target=stats_autoclear_daemon, daemon=True).start()
+    except Exception as e:
+        cool_error_handler(e, context="main: start stats_autoclear_daemon")
+    port = int(os.getenv("PORT", 5000))
+    try:
+        app.run(host="0.0.0.0", port=port)
+    except Exception as e:
+        cool_error_handler(e, context="main: app.run")
