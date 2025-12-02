@@ -4,6 +4,7 @@ import json
 import requests
 import threading
 import traceback
+import datetime
 from flask import Flask, request
 
 # ====== Логирование ======
@@ -64,7 +65,8 @@ def time_debugger():
 MAIN_MENU = [
     "📢 Про нас",
     "Графік роботи",
-    "📝 Написати адміну"
+    "📝 Написати адміну",
+    "📊 Статистика происшествий"
 ]
 
 def get_reply_buttons():
@@ -72,14 +74,94 @@ def get_reply_buttons():
         "keyboard": [
             [{"text": "📢 Про нас"}],
             [{"text": "Графік роботи"}],
-            [{"text": "📝 Написати адміну"}]
+            [{"text": "📝 Написати адміну"}],
+            [{"text": "📊 Статистика происшествий"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": True
     }
 
-# ====== Хранилище для ожидания сообщения админу ======
+# ====== Подпункты для связи с админом ======
+ADMIN_SUBCATEGORIES = [
+    "ДТП",
+    "Вбивство",
+    "Бытовуха",
+    "Розшук",
+    "Коммунальные аварии",
+    "Разное"
+]
+
+def get_admin_subcategory_buttons():
+    return {
+        "keyboard": [[{"text": cat}] for cat in ADMIN_SUBCATEGORIES],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
+
+# ====== Хранилище для ожидания сообщения админу и категории ======
 waiting_for_admin_message = set()
+user_admin_category = {}  # user_id -> category
+
+# ====== Хранилище событий и статистики ======
+EVENTS_FILE = 'events.json'
+
+def save_event(category):
+    try:
+        now_iso = datetime.datetime.now().isoformat()
+        events = []
+        if os.path.exists(EVENTS_FILE):
+            with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
+                events = json.load(f)
+        events.append({"category": category, "dt": now_iso})
+        with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(events, f)
+    except Exception as e:
+        cool_error_handler(e, "save_event")
+
+def get_stats():
+    res = {cat: {'week': 0, 'month': 0} for cat in ADMIN_SUBCATEGORIES}
+    now = datetime.datetime.now()
+    if os.path.exists(EVENTS_FILE):
+        try:
+            with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
+                events = json.load(f)
+            for ev in events:
+                cat = ev['category']
+                dt_ev = datetime.datetime.fromisoformat(ev['dt'])
+                if (now - dt_ev).days < 7:
+                    if cat in res:
+                        res[cat]['week'] += 1
+                if (now - dt_ev).days < 30:
+                    if cat in res:
+                        res[cat]['month'] += 1
+            return res
+        except Exception as e:
+            cool_error_handler(e, "get_stats")
+            return None
+    else:
+        return res
+
+def clear_stats_if_month_passed():
+    now = datetime.datetime.now()
+    if os.path.exists(EVENTS_FILE):
+        try:
+            with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
+                events = json.load(f)
+            # Оставляем только события не старше 30 дней
+            events = [ev for ev in events
+                     if (now - datetime.datetime.fromisoformat(ev['dt'])).days < 30]
+            with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(events, f)
+        except Exception as e:
+            cool_error_handler(e, "clear_stats_if_month_passed")
+
+def stats_autoclear_daemon():
+    while True:
+        try:
+            clear_stats_if_month_passed()
+        except Exception as e:
+            cool_error_handler(e, "stats_autoclear_daemon")
+        time.sleep(3600)  # каждые 60 минут очищаем
 
 # ====== Конфигурация ======
 TOKEN = os.getenv("API_TOKEN")
@@ -127,7 +209,7 @@ def _get_reply_markup_for_admin(user_id: int):
         ]
     }
 
-def forward_user_message_to_admin(message: dict):
+def forward_user_message_to_admin(message):
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
             send_message(message['chat']['id'], "⚠️ Админ не настроен.")
@@ -137,11 +219,17 @@ def forward_user_message_to_admin(message: dict):
         user_first = message['from'].get('first_name', 'Без имени')
         msg_id = message.get('message_id')
         text = message.get('text') or message.get('caption') or ''
-        admin_info = f"📩 От {user_first}\nID: {user_chat_id}"
+        # Получить категорию
+        category = user_admin_category.get(user_chat_id, 'Без категорії')
+        admin_info = f"📩 Категорія: {category}\nОт {user_first}\nID: {user_chat_id}"
         if text:
             admin_info += f"\n\n{text}"
 
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
+
+        # Сохраняем событие для статистики если категория валидная
+        if category in ADMIN_SUBCATEGORIES:
+            save_event(category)
 
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
@@ -293,16 +381,35 @@ def webhook():
                         "Адмін може спати, але обов’язково відповість 😉"
                     )
                 elif text == "📝 Написати адміну":
-                    waiting_for_admin_message.add(chat_id)
+                    # Показываем подкатегории
                     send_message(
                         chat_id,
-                        "✍️ Напишіть повідомлення адміну (текст/фото/документ):"
+                        "Оберіть категорію повідомлення:",
+                        reply_markup=get_admin_subcategory_buttons()
                     )
+                elif text == "📊 Статистика происшествий":
+                    stats = get_stats()
+                    if stats:
+                        msg = "Статистика за 7 днів / 30 днів:\n"
+                        for cat in ADMIN_SUBCATEGORIES:
+                            msg += f"{cat}: за 7 днів — {stats[cat]['week']}, за 30 днів — {stats[cat]['month']}\n"
+                        send_message(chat_id, msg)
+                    else:
+                        send_message(chat_id, "Дані не знайдені.")
+            elif text in ADMIN_SUBCATEGORIES:
+                # Пользователь выбрал категорию для админу
+                user_admin_category[chat_id] = text
+                waiting_for_admin_message.add(chat_id)
+                send_message(
+                    chat_id,
+                    f"✍️ Напишіть текст або надішліть файл для категорії '{text}':"
+                )
             else:
-                # Принимаем сообщение админу только если была нажата соответствующая кнопка
+                # Принимаем сообщение админу только если была выбрана категория
                 if chat_id in waiting_for_admin_message:
                     forward_user_message_to_admin(message)
                     waiting_for_admin_message.remove(chat_id)
+                    user_admin_category.pop(chat_id, None)
                 else:
                     send_message(
                         chat_id,
@@ -331,6 +438,11 @@ if __name__ == "__main__":
         threading.Thread(target=time_debugger, daemon=True).start()
     except Exception as e:
         cool_error_handler(e, context="main: start time_debugger")
+    # Автоочистка статистики событий каждые 60 минут
+    try:
+        threading.Thread(target=stats_autoclear_daemon, daemon=True).start()
+    except Exception as e:
+        cool_error_handler(e, context="main: start stats_autoclear_daemon")
     port = int(os.getenv("PORT", 5000))
     try:
         app.run(host="0.0.0.0", port=port)
