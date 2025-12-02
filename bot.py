@@ -7,38 +7,34 @@ import traceback
 import datetime
 from flask import Flask, request
 
-# ====== Логирование ======
-def MainProtokol(s, ts='Запись'):
+# ====== Логування ======
+def MainProtokol(s, ts='Запис'):
     dt = time.strftime('%d.%m.%Y %H:%M:') + '00'
     try:
         with open('log.txt', 'a', encoding='utf-8') as f:
             f.write(f"{dt};{ts};{s}\n")
     except Exception as e:
-        print("Ошибка записи в лог:", e)
+        print("Помилка запису в лог:", e)
 
-# ====== Максимально крутой обработчик ошибок ======
+# ====== Крутий обробник помилок ======
 def cool_error_handler(exc, context=""):
     exc_type = type(exc).__name__
     tb_str = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     msg = (
         f"\n{'='*40}\n"
         f"[CRITICAL ERROR]: {exc_type}\n"
-        f"Context: {context}\n"
-        f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Контекст: {context}\n"
+        f"Час: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Traceback:\n{tb_str}\n"
         f"{'='*40}\n"
     )
-    # Запись в лог файл
     try:
         with open('critical_errors.log', 'a', encoding='utf-8') as f:
             f.write(msg)
     except Exception as e:
-        print("Ошибка при записи критической ошибки:", e)
-    # Также пишем в основной лог
+        print("Помилка при запису критичної помилки:", e)
     MainProtokol(msg, ts='CRITICAL ERROR')
-    # Выводим в консоль
     print(msg)
-    # Если админ задан, отправляем в Telegram админу
     admin_id = int(os.getenv("ADMIN_ID", "0"))
     token = os.getenv("API_TOKEN")
     if admin_id and token:
@@ -47,48 +43,48 @@ def cool_error_handler(exc, context=""):
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data={
                     "chat_id": admin_id,
-                    "text": f"⚠️ Critically Error!\nТип: {exc_type}\nContext: {context}\n\n{str(exc)}",
+                    "text": f"⚠️ Критична помилка!\nТип: {exc_type}\nКонтекст: {context}\n\n{str(exc)}",
                     "disable_web_page_preview": True
                 },
                 timeout=5
             )
         except Exception as e:
-            print("Ошибка при отправке ошибки админу:", e)
+            print("Помилка при надсиланні помилки адміну:", e)
 
-# ====== Отладка времени в консоль (фоновый поток, каждые 5 минут) ======
+# ====== Відладка часу в консоль (фоновий потік, кожні 5 хвилин) ======
 def time_debugger():
     while True:
         print("[DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
-        time.sleep(300)  # 5 минут
+        time.sleep(300)
 
-# ====== Главное меню (reply-кнопки) ======
+# ====== Головне меню (reply-кнопки) ======
 MAIN_MENU = [
     "📢 Про нас",
-    "Графік роботи",
-    "📝 Написати адміну",
-    "📊 Статистика происшествий"
+    "🕰️ Графік роботи",
+    "📝 Повідомити про подію",
+    "📊 Статистика подій"
 ]
 
 def get_reply_buttons():
     return {
         "keyboard": [
             [{"text": "📢 Про нас"}],
-            [{"text": "Графік роботи"}],
-            [{"text": "📝 Написати адміну"}],
-            [{"text": "📊 Статистика происшествий"}]
+            [{"text": "🕰️ Графік роботи"}],
+            [{"text": "📝 Повідомити про подію"}],
+            [{"text": "📊 Статистика подій"}]
         ],
         "resize_keyboard": True,
-        "one_time_keyboard": True
+        "one_time_keyboard": False
     }
 
-# ====== Подпункты для связи с админом ======
+# ====== Категорії подій ======
 ADMIN_SUBCATEGORIES = [
-    "ДТП",
-    "Вбивство",
-    "Бытовуха",
-    "Розшук",
-    "Коммунальные аварии",
-    "Разное"
+    "🚗 ДТП",
+    "🔪 Вбивство",
+    "🏠 Побутова подія",
+    "🕵️‍♂️ Розшук",
+    "💧 Комунальна аварія",
+    "📦 Інше"
 ]
 
 def get_admin_subcategory_buttons():
@@ -98,11 +94,11 @@ def get_admin_subcategory_buttons():
         "one_time_keyboard": True
     }
 
-# ====== Хранилище для ожидания сообщения админу и категории ======
+# ====== Хранилище для статусу вибору категорії користувача ======
 waiting_for_admin_message = set()
-user_admin_category = {}  # user_id -> category
+user_admin_category = {}
 
-# ====== Хранилище событий и статистики ======
+# ====== Хранилище подій для статистики ======
 EVENTS_FILE = 'events.json'
 
 def save_event(category):
@@ -147,7 +143,6 @@ def clear_stats_if_month_passed():
         try:
             with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
                 events = json.load(f)
-            # Оставляем только события не старше 30 дней
             events = [ev for ev in events
                      if (now - datetime.datetime.fromisoformat(ev['dt'])).days < 30]
             with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
@@ -161,14 +156,14 @@ def stats_autoclear_daemon():
             clear_stats_if_month_passed()
         except Exception as e:
             cool_error_handler(e, "stats_autoclear_daemon")
-        time.sleep(3600)  # каждые 60 минут очищаем
+        time.sleep(3600)  # кожні 60 хвилин
 
-# ====== Конфигурация ======
+# ====== Конфігурація ======
 TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{TOKEN}"
 
-# ====== Установка вебхука ======
+# ====== Встановлення webhook ======
 def set_webhook():
     try:
         r = requests.get(
@@ -176,15 +171,15 @@ def set_webhook():
             params={"url": WEBHOOK_URL}
         )
         if r.ok:
-            print("Webhook успешно установлен!")
+            print("Webhook успішно встановлено!")
         else:
-            print("Ошибка при установке webhook:", r.text)
+            print("Помилка при встановленні webhook:", r.text)
     except Exception as e:
         cool_error_handler(e, context="set_webhook")
 
 set_webhook()
 
-# ====== Отправка сообщений ======
+# ====== Надсилання повідомлень ======
 def send_message(chat_id, text, reply_markup=None):
     url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
     payload = {
@@ -196,11 +191,11 @@ def send_message(chat_id, text, reply_markup=None):
     try:
         resp = requests.post(url, data=payload)
         if not resp.ok:
-            MainProtokol(resp.text, 'Ошибка отправки')
+            MainProtokol(resp.text, 'Помилка надсилання')
         return resp
     except Exception as e:
         cool_error_handler(e, context="send_message")
-        MainProtokol(str(e), 'Ошибка сети')
+        MainProtokol(str(e), 'Помилка мережі')
 
 def _get_reply_markup_for_admin(user_id: int):
     return {
@@ -212,22 +207,19 @@ def _get_reply_markup_for_admin(user_id: int):
 def forward_user_message_to_admin(message):
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
-            send_message(message['chat']['id'], "⚠️ Админ не настроен.")
+            send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
             return
 
         user_chat_id = message['chat']['id']
-        user_first = message['from'].get('first_name', 'Без имени')
+        user_first = message['from'].get('first_name', 'Без імені')
         msg_id = message.get('message_id')
         text = message.get('text') or message.get('caption') or ''
-        # Получить категорию
         category = user_admin_category.get(user_chat_id, 'Без категорії')
-        admin_info = f"📩 Категорія: {category}\nОт {user_first}\nID: {user_chat_id}"
+        admin_info = f"📩 Категорія: {category}\nВід: {user_first}\nID: {user_chat_id}"
         if text:
             admin_info += f"\n\n{text}"
 
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
-
-        # Сохраняем событие для статистики если категория валидная
         if category in ADMIN_SUBCATEGORIES:
             save_event(category)
 
@@ -237,7 +229,7 @@ def forward_user_message_to_admin(message):
             fwd_resp = requests.post(fwd_url, data=fwd_payload)
             if fwd_resp.ok:
                 send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
-                send_message(user_chat_id, "✅ Повідомлення надіслано адміну!")
+                send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
                 return
             else:
                 MainProtokol(f"forwardMessage failed: {fwd_resp.text}", "ForwardFail")
@@ -272,35 +264,33 @@ def forward_user_message_to_admin(message):
                     break
             else:
                 send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
-                send_message(user_chat_id, "✅ Повідомлення надіслано адміну!")
+                send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
                 return
         except Exception as e:
             cool_error_handler(e, context="forward_user_message_to_admin: sendMedia")
             MainProtokol(str(e), "SendMediaException")
 
         if media_sent:
-            send_message(user_chat_id, "✅ Повідомлення надіслано адміну!")
+            send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
         else:
             send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
-            send_message(user_chat_id, "⚠️ Не вдалося переслати медіа. Адміну надіслано текстове повідомлення.")
+            send_message(user_chat_id, "⚠️ Не вдалося переслати медіа. Адміністратору надіслано текстове повідомлення.")
     except Exception as e:
         cool_error_handler(e, context="forward_user_message_to_admin: unhandled")
         MainProtokol(str(e), "ForwardUnhandledException")
         try:
-            send_message(message['chat']['id'], "⚠️ Сталась помилка при відправці. Спробуйте ще раз.")
+            send_message(message['chat']['id'], "⚠️ Виникла помилка при надсиланні. Спробуйте ще раз.")
         except Exception as err:
             cool_error_handler(err, context="forward_user_message_to_admin: notify user")
 
-# ====== Хранилище ожидания ответа от админа ======
 waiting_for_admin = {}
 
-# ====== Flask ======
 app = Flask(__name__)
 
 @app.errorhandler(Exception)
 def flask_global_error_handler(e):
     cool_error_handler(e, context="Flask global error handler")
-    return "Внутренняя ошибка сервера. Администратору отправлено уведомление.", 500
+    return "Внутрішня помилка сервера. Адміністратору надіслано повідомлення.", 500
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
@@ -323,25 +313,23 @@ def webhook():
                     )
                 except Exception as e:
                     cool_error_handler(e, context="webhook: callback_query reply_")
-                    MainProtokol(str(e), 'Ошибка callback reply')
+                    MainProtokol(str(e), 'Помилка callback reply')
             elif data == "about":
                 send_message(
                     chat_id,
-                    "Ми створюємо телеграм ботів. "
-                    "Детальніше: "
-                    "https://www.instagram.com/p/DOEpwuEiLuC/"
+                    "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\n"
+                    "Більше про нас: https://www.instagram.com/p/DOEpwuEiLuC/"
                 )
             elif data == "schedule":
                 send_message(
                     chat_id,
-                    "Наш бот приймає повідомлення 25/8! "
-                    "Адмін може спати, але обов’язково відповість 😉"
+                    "Наш бот приймає повідомлення 24/7! Адміністратор завжди розглядає ваші звернення."
                 )
             elif data == "write_admin":
                 waiting_for_admin_message.add(chat_id)
                 send_message(
                     chat_id,
-                    "✍️ Напишіть повідомлення адміну (текст/фото/документ):"
+                    "✍️ Напишіть повідомлення адміністратору (текст/фото/документ):"
                 )
             return "ok", 200
 
@@ -350,95 +338,93 @@ def webhook():
             chat_id = message['chat']['id']
             from_id = message['from']['id']
             text = message.get('text', '')
-            first_name = message['from'].get('first_name', 'Без имени')
+            first_name = message['from'].get('first_name', 'Без імені')
 
-            # Ответ админа пользователю
+            # Відповідь адміністратора користувачу
             if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
                 user_id = waiting_for_admin.pop(ADMIN_ID)
-                send_message(user_id, f"💬 Адмін:\n{text}")
+                send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
                 send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
                 return "ok", 200
 
-            # Главное меню как Reply-кнопки
+            # Головне меню як reply-кнопки
             if text == '/start':
                 send_message(
                     chat_id,
-                    "Ласкаво просимо! Виберіть дію в меню 👇",
+                    "Вітаємо! 👋\nОберіть потрібну дію у меню нижче:",
                     reply_markup=get_reply_buttons()
                 )
             elif text in MAIN_MENU:
                 if text == "📢 Про нас":
                     send_message(
                         chat_id,
-                        "Ми створюємо телеграм ботів. "
-                        "Детальніше: "
-                        "https://www.instagram.com/p/DOEpwuEiLuC/"
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\n"
+                        "Дізнатись більше: https://www.instagram.com/p/DOEpwuEiLuC/"
                     )
-                elif text == "Графік роботи":
+                elif text == "🕰️ Графік роботи":
                     send_message(
                         chat_id,
-                        "Наш бот приймає повідомлення 25/8! "
-                        "Адмін може спати, але обов’язково відповість 😉"
+                        "Ми працюємо цілодобово.\nЗвертайтесь у будь-який час — відповідаємо максимально швидко."
                     )
-                elif text == "📝 Написати адміну":
-                    # Показываем подкатегории
+                elif text == "📝 Повідомити про подію":
                     send_message(
                         chat_id,
-                        "Оберіть категорію повідомлення:",
+                        "Оберіть тип події, яку хочете повідомити:",
                         reply_markup=get_admin_subcategory_buttons()
                     )
-                elif text == "📊 Статистика происшествий":
+                elif text == "📊 Статистика подій":
                     stats = get_stats()
                     if stats:
-                        msg = "Статистика за 7 днів / 30 днів:\n"
+                        msg = "<b>Статистика за 7 та 30 днів:</b>\n"
                         for cat in ADMIN_SUBCATEGORIES:
-                            msg += f"{cat}: за 7 днів — {stats[cat]['week']}, за 30 днів — {stats[cat]['month']}\n"
+                            msg += f"{cat}: за 7 днів — <b>{stats[cat]['week']}</b>, за 30 днів — <b>{stats[cat]['month']}</b>\n"
                         send_message(chat_id, msg)
                     else:
-                        send_message(chat_id, "Дані не знайдені.")
+                        send_message(chat_id, "Наразі статистика недоступна.")
             elif text in ADMIN_SUBCATEGORIES:
-                # Пользователь выбрал категорию для админу
                 user_admin_category[chat_id] = text
                 waiting_for_admin_message.add(chat_id)
                 send_message(
                     chat_id,
-                    f"✍️ Напишіть текст або надішліть файл для категорії '{text}':"
+                    f"Будь ласка, опишіть деталі події \"{text}\" (можна прикріпити фото чи файл):"
                 )
             else:
-                # Принимаем сообщение админу только если была выбрана категория
                 if chat_id in waiting_for_admin_message:
                     forward_user_message_to_admin(message)
                     waiting_for_admin_message.remove(chat_id)
                     user_admin_category.pop(chat_id, None)
+                    send_message(
+                        chat_id,
+                        "Ваша інформація передана. Дякуємо за активну позицію! Якщо потрібно — звертайтесь ще.",
+                        reply_markup=get_reply_buttons()
+                    )
                 else:
                     send_message(
                         chat_id,
-                        "Щоб написати адміну, спочатку натисніть кнопку '📝 Написати адміну' у меню."
+                        "Щоб повідомити адміна, спочатку натисніть кнопку «📝 Повідомити про подію» в меню.",
+                        reply_markup=get_reply_buttons()
                     )
-
         return "ok", 200
 
     except Exception as e:
         cool_error_handler(e, context="webhook - outer")
-        MainProtokol(str(e), 'Ошибка webhook')
+        MainProtokol(str(e), 'Помилка webhook')
         return "ok", 200
 
 @app.route('/', methods=['GET'])
 def index():
     try:
-        MainProtokol('Кто-то зашел на сайт')
-        return "Бот работает", 200
+        MainProtokol('Відвідання сайту')
+        return "Бот працює", 200
     except Exception as e:
         cool_error_handler(e, context="index route")
         return "Error", 500
 
 if __name__ == "__main__":
-    # Запуск отладчика времени в отдельном потоке (каждые 5 минут)
     try:
         threading.Thread(target=time_debugger, daemon=True).start()
     except Exception as e:
         cool_error_handler(e, context="main: start time_debugger")
-    # Автоочистка статистики событий каждые 60 минут
     try:
         threading.Thread(target=stats_autoclear_daemon, daemon=True).start()
     except Exception as e:
