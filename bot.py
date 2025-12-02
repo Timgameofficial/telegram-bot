@@ -7,6 +7,9 @@ import traceback
 import datetime
 from flask import Flask, request
 
+from PIL import Image, ImageDraw, ImageFont
+import io
+
 # ====== Логування ======
 def MainProtokol(s, ts='Запис'):
     dt = time.strftime('%d.%m.%Y %H:%M:') + '00'
@@ -51,13 +54,11 @@ def cool_error_handler(exc, context=""):
         except Exception as e:
             print("Помилка при надсиланні помилки адміну:", e)
 
-# ====== Відладка часу в консоль (фоновий потік, кожні 5 хвилин) ======
 def time_debugger():
     while True:
         print("[DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
         time.sleep(300)
 
-# ====== Головне меню (reply-кнопки) ======
 MAIN_MENU = [
     "📢 Про нас",
     "🕰️ Графік роботи",
@@ -77,7 +78,6 @@ def get_reply_buttons():
         "one_time_keyboard": False
     }
 
-# ====== Категорії подій ======
 ADMIN_SUBCATEGORIES = [
     "🚗 ДТП",
     "🔪 Вбивство",
@@ -94,11 +94,8 @@ def get_admin_subcategory_buttons():
         "one_time_keyboard": True
     }
 
-# ====== Хранилище для статусу вибору категорії користувача ======
 waiting_for_admin_message = set()
 user_admin_category = {}
-
-# ====== Хранилище подій для статистики ======
 EVENTS_FILE = 'events.json'
 
 def save_event(category):
@@ -156,14 +153,73 @@ def stats_autoclear_daemon():
             clear_stats_if_month_passed()
         except Exception as e:
             cool_error_handler(e, "stats_autoclear_daemon")
-        time.sleep(3600)  # кожні 60 хвилин
+        time.sleep(3600)
+
+# === Генератор зображення зі статистикою ===
+def generate_stats_image(stats):
+    width, margin, header_height = 600, 40, 80
+    line_height = 48
+    background = (255, 255, 255)
+    items_count = len(stats)
+    total_height = header_height + (line_height+5)*items_count + margin + 60
+
+    img = Image.new('RGB', (width, total_height), color=background)
+    draw = ImageDraw.Draw(img)
+
+    try:
+        font_header = ImageFont.truetype("arial.ttf", 44)
+        font_logo = ImageFont.truetype("arial.ttf", 30)
+        font_line = ImageFont.truetype("arial.ttf", 32)
+    except Exception:
+        font_header = ImageFont.load_default()
+        font_logo = ImageFont.load_default()
+        font_line = ImageFont.load_default()
+
+    # Лого зверху
+    logo_text = "spilkuvach 2.0"
+    logo_width, logo_height = draw.textsize(logo_text, font=font_logo)
+    draw.text(((width - logo_width)//2, 16), logo_text, fill=(55, 93, 194), font=font_logo)
+
+    # Заголовок під лого
+    header_text = "Статистика подій (Останні 7 та 30 днів)"
+    header_width, _ = draw.textsize(header_text, font=font_header)
+    draw.text(((width-header_width)//2, 60), header_text, fill=(33,53,85), font=font_header)
+
+    # Отступи та список проиществій
+    y = header_height + margin
+    for cat, v in stats.items():
+        line = f"{cat}:\n   За 7 днів — {v['week']}\n   За 30 днів — {v['month']}"
+        draw.text((margin, y), line, fill=(44,62,80), font=font_line)
+        y += line_height + 14  # дополнительный отступ
+
+    # Рисуем тонкую линию под списком
+    draw.line([(margin, y+5), (width-margin, y+5)], fill=(220,220,220), width=3)
+
+    img_bytes = io.BytesIO()
+    img.save(img_bytes, format='PNG')
+    img_bytes.seek(0)
+    return img_bytes
+
+def send_photo(chat_id, photo_bytes, caption=None):
+    url = f'https://api.telegram.org/bot{TOKEN}/sendPhoto'
+    files = {'photo': photo_bytes}
+    data = {'chat_id': chat_id}
+    if caption:
+        data['caption'] = caption
+    try:
+        resp = requests.post(url, files=files, data=data)
+        if not resp.ok:
+            MainProtokol(resp.text, 'Помилка надсилання фото')
+        return resp
+    except Exception as e:
+        cool_error_handler(e, context="send_photo")
+        MainProtokol(str(e), 'Помилка мережі')
 
 # ====== Конфігурація ======
 TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{TOKEN}"
 
-# ====== Встановлення webhook ======
 def set_webhook():
     try:
         r = requests.get(
@@ -179,7 +235,6 @@ def set_webhook():
 
 set_webhook()
 
-# ====== Надсилання повідомлень ======
 def send_message(chat_id, text, reply_markup=None):
     url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
     payload = {
@@ -375,10 +430,8 @@ def webhook():
                 elif text == "📊 Статистика подій":
                     stats = get_stats()
                     if stats:
-                        msg = "Статистика за 7 та 30 днів:\n"
-                        for cat in ADMIN_SUBCATEGORIES:
-                            msg += f"{cat}: за 7 днів — {stats[cat]['week']}, за 30 днів — {stats[cat]['month']}\n"
-                        send_message(chat_id, msg)
+                        img_bytes = generate_stats_image(stats)
+                        send_photo(chat_id, img_bytes, caption="Звіт по всіх категоріях за останні 7 та 30 днів")
                     else:
                         send_message(chat_id, "Наразі статистика недоступна.")
             elif text in ADMIN_SUBCATEGORIES:
