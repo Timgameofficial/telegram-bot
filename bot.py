@@ -177,12 +177,15 @@ def generate_stats_image(stats):
 
     # Лого зверху
     logo_text = "spilkuvach 2.0"
-    logo_width, logo_height = draw.textsize(logo_text, font=font_logo)
+    logo_bbox = draw.textbbox((0,0), logo_text, font=font_logo)
+    logo_width = logo_bbox[2] - logo_bbox[0]
+    logo_height = logo_bbox[3] - logo_bbox[1]
     draw.text(((width - logo_width)//2, 16), logo_text, fill=(55, 93, 194), font=font_logo)
 
     # Заголовок під лого
     header_text = "Статистика подій (Останні 7 та 30 днів)"
-    header_width, _ = draw.textsize(header_text, font=font_header)
+    header_bbox = draw.textbbox((0,0), header_text, font=font_header)
+    header_width = header_bbox[2] - header_bbox[0]
     draw.text(((width-header_width)//2, 60), header_text, fill=(33,53,85), font=font_header)
 
     # Отступи та список проиществій
@@ -192,7 +195,7 @@ def generate_stats_image(stats):
         draw.text((margin, y), line, fill=(44,62,80), font=font_line)
         y += line_height + 14  # дополнительный отступ
 
-    # Рисуем тонкую линию под списком
+    # Рисуем тонку лінію під списком
     draw.line([(margin, y+5), (width-margin, y+5)], fill=(220,220,220), width=3)
 
     img_bytes = io.BytesIO()
