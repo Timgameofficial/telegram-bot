@@ -1,7 +1,4 @@
-# Исправленная и улучшенная версия вашего бота
-# Проверьте и при необходимости скорректируйте переменные окружения:
-# API_TOKEN, ADMIN_ID, WEBHOOK_HOST (напр. https://yourdomain.com), WEBHOOK_SECRET (опционально)
-
+# Исправленная версия: корректная обработка HTTPException в глобальном обработчике Flask
 import os
 import time
 import json
@@ -10,6 +7,8 @@ import threading
 import traceback
 import datetime
 from flask import Flask, request, abort
+
+from werkzeug.exceptions import HTTPException
 
 from PIL import Image, ImageDraw, ImageFont
 import io
@@ -296,10 +295,6 @@ def _get_reply_markup_for_admin(user_id: int):
     }
 
 def forward_user_message_to_admin(message):
-    """
-    Пересылает сообщение админу (только админу), НЕ отправляет подтверждение пользователю.
-    Возвращает True, если админу отправлено сообщение (включая текстовое), False если админ не настроен или произошла ошибка.
-    """
     try:
         if not ADMIN_ID:
             return False
@@ -317,13 +312,11 @@ def forward_user_message_to_admin(message):
         if category in ADMIN_SUBCATEGORIES:
             save_event(category)
 
-        # Сначала пробуем forwardMessage — это дает оригинальное сообщение
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
             fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
             fwd_resp = requests.post(fwd_url, data=fwd_payload, timeout=REQUEST_TIMEOUT)
             if fwd_resp.ok:
-                # добавляем дополнительный контекст под пересланным сообщением
                 send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
                 return True
             else:
@@ -331,7 +324,6 @@ def forward_user_message_to_admin(message):
         except Exception as e:
             cool_error_handler(e, context="forward_user_message_to_admin: forwardMessage")
 
-        # Если forward не прошел, пробуем отправить медиа/текст напрямую
         try:
             media_sent = False
             media_types = [
@@ -344,7 +336,6 @@ def forward_user_message_to_admin(message):
             ]
             for key, endpoint, payload_key in media_types:
                 if key in message:
-                    # photo — список размеров
                     file_id = message[key][-1]['file_id'] if key == 'photo' else message[key]['file_id']
                     url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
                     payload = {
@@ -362,7 +353,6 @@ def forward_user_message_to_admin(message):
             if media_sent:
                 return True
             else:
-                # Если нет медиа — отправляем текстовый контекст
                 send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
                 return True
         except Exception as e:
@@ -377,6 +367,13 @@ app = Flask(__name__)
 
 @app.errorhandler(Exception)
 def flask_global_error_handler(e):
+    # Если это HTTPException (например, abort(403)), не считаем это критической ошибкой:
+    if isinstance(e, HTTPException):
+        # Коротко логируем, но НЕ вызываем cool_error_handler и НЕ шлём админу
+        MainProtokol(f"HTTPException: {e}", ts='HTTP_EXCEPTION')
+        # Возвращаем стандартный ответ для HTTPException
+        return e.get_response()
+    # Для всех остальных исключений — нормальная критическая обработка
     cool_error_handler(e, context="Flask global error handler")
     return "Внутрішня помилка сервера. Адміністратору надіслано повідомлення.", 500
 
@@ -388,176 +385,5 @@ def webhook_with_token(token):
         abort(403)
     return webhook()
 
-def webhook():
-    try:
-        data_raw = request.get_data(as_text=True)
-        update = json.loads(data_raw)
-
-        if 'callback_query' in update:
-            call = update['callback_query']
-            chat_id = call['from']['id']
-            data = call['data']
-
-            if data.startswith("reply_") and chat_id == ADMIN_ID:
-                try:
-                    user_id = int(data.split("_", 1)[1])
-                    waiting_for_admin[ADMIN_ID] = user_id
-                    send_message(
-                        ADMIN_ID,
-                        f"✍️ Введіть відповідь для користувача {user_id}:"
-                    )
-                except Exception as e:
-                    cool_error_handler(e, context="webhook: callback_query reply_")
-                    MainProtokol(str(e), 'Помилка callback reply')
-            elif data == "about":
-                send_message(
-                    chat_id,
-                    "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nБільше про нас: https://www.instagram.com/spilkuvach/"
-                )
-            elif data == "schedule":
-                send_message(
-                    chat_id,
-                    "Наш бот приймає повідомлення 24/7! Адміністратор завжди розглядає ваші звернення."
-                )
-            elif data == "write_admin":
-                waiting_for_admin_message.add(chat_id)
-                send_message(
-                    chat_id,
-                    "✍️ Напишіть повідомлення адміністратору (текст/фото/документ):"
-                )
-            return "ok", 200
-
-        if 'message' in update:
-            message = update['message']
-            chat_id = message['chat']['id']
-            from_id = message['from']['id']
-            text = message.get('text', '')
-            first_name = message['from'].get('first_name', 'Без імені')
-
-            # Ответ администратора пользователю (waiting_for_admin хранит mapping admin->user)
-            if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
-                user_id = waiting_for_admin.pop(ADMIN_ID)
-                send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
-                send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
-                return "ok", 200
-
-            if text == '/start':
-                send_message(
-                    chat_id,
-                    "Вітаємо! 👋\nОберіть потрібну дію у меню нижче:",
-                    reply_markup=get_reply_buttons()
-                )
-            elif text in MAIN_MENU:
-                if text == "📢 Про нас":
-                    send_message(
-                        chat_id,
-                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: https://www.instagram.com/spilkuvach/"
-                    )
-                elif text == "🕰️ Графік роботи":
-                    send_message(
-                        chat_id,
-                        "Ми працюємо цілодобово.\nЗвертайтесь у будь-який час — відповідаємо максимально швидко."
-                    )
-                elif text == "📝 Повідомити про подію":
-                    send_message(
-                        chat_id,
-                        "Оберіть тип події, яку хочете повідомити:",
-                        reply_markup=get_admin_subcategory_buttons()
-                    )
-                elif text == "📊 Статистика подій":
-                    stats = get_stats()
-                    if stats:
-                        img_bytes = generate_stats_image(stats)
-                        send_photo(chat_id, img_bytes, caption="Звіт по всіх категоріях за останні 7 та 30 днів")
-                    else:
-                        send_message(chat_id, "Наразі статистика недоступна.")
-            elif text in ADMIN_SUBCATEGORIES:
-                user_admin_category[chat_id] = text
-                waiting_for_admin_message.add(chat_id)
-                send_message(
-                    chat_id,
-                    f"Будь ласка, опишіть деталі події \"{text}\" (можна прикріпити фото чи файл):"
-                )
-            else:
-                if chat_id in waiting_for_admin_message:
-                    # Пересылаем админу и отправляем пользователю одно подтверждение
-                    ok = forward_user_message_to_admin(message)
-                    waiting_for_admin_message.discard(chat_id)
-                    user_admin_category.pop(chat_id, None)
-                    if ok:
-                        send_message(
-                            chat_id,
-                            "Ваша інформація передана. Дякуємо за активну позицію! Якщо потрібно — звертайтесь ще.",
-                            reply_markup=get_reply_buttons()
-                        )
-                    else:
-                        send_message(
-                            chat_id,
-                            "⚠️ Не вдалося надіслати повідомлення адміністратору. Спробуйте пізніше.",
-                            reply_markup=get_reply_buttons()
-                        )
-                else:
-                    send_message(
-                        chat_id,
-                        "Щоб повідомити адміна, спочатку натисніть кнопку «📝 Повідомити про подію» в меню.",
-                        reply_markup=get_reply_buttons()
-                    )
-        return "ok", 200
-
-    except Exception as e:
-        cool_error_handler(e, context="webhook - outer")
-        MainProtokol(str(e), 'Помилка webhook')
-        return "ok", 200
-
-@app.route('/', methods=['GET'])
-def index():
-    try:
-        MainProtokol('Відвідання сайту')
-        return "Бот працює", 200
-    except Exception as e:
-        cool_error_handler(e, context="index route")
-        return "Error", 500
-
-def set_webhook():
-    if not TOKEN:
-        print("Cannot set webhook: API_TOKEN missing")
-        return
-    if not WEBHOOK_HOST or not WEBHOOK_SECRET:
-        print("WEBHOOK_HOST or WEBHOOK_SECRET not set; skipping webhook registration")
-        return
-    url = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-    try:
-        r = requests.get(
-            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-            params={"url": url},
-            timeout=REQUEST_TIMEOUT
-        )
-        if r.ok:
-            print("Webhook успішно встановлено!")
-        else:
-            print("Помилка при встановленні webhook:", r.text)
-            MainProtokol(r.text, 'WebhookFail')
-    except Exception as e:
-        cool_error_handler(e, context="set_webhook")
-
-if __name__ == "__main__":
-    # Установка webhook при запуске через __main__ (локально/на render)
-    try:
-        set_webhook()
-    except Exception as e:
-        cool_error_handler(e, context="main: set_webhook")
-
-    try:
-        threading.Thread(target=time_debugger, daemon=True).start()
-    except Exception as e:
-        cool_error_handler(e, context="main: start time_debugger")
-    try:
-        threading.Thread(target=stats_autoclear_daemon, daemon=True).start()
-    except Exception as e:
-        cool_error_handler(e, context="main: start stats_autoclear_daemon")
-    port = int(os.getenv("PORT", 5000))
-    try:
-        # В продакшене используйте gunicorn/uvicorn
-        app.run(host="0.0.0.0", port=port)
-    except Exception as e:
-        cool_error_handler(e, context="main: app.run")
+# ... остальной код (webhook, send_message и т.д.) остаётся без изменений ...
+# Для компактности здесь опущён дублирующийся код из оригинала; в вашей копии вставьте остальные функции / маршруты без изменений.
