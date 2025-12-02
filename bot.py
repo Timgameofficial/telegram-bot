@@ -173,9 +173,9 @@ def generate_stats_image(stats):
     draw = ImageDraw.Draw(img)
 
     try:
-        font_header = ImageFont.truetype(FONT_PATH, 25)
+        font_header = ImageFont.truetype(FONT_PATH, 5)
         font_logo = ImageFont.truetype(FONT_PATH, 30)
-        font_line = ImageFont.truetype(FONT_PATH, 25)
+        font_line = ImageFont.truetype(FONT_PATH, 5)
     except Exception:
         font_header = ImageFont.load_default()
         font_logo = ImageFont.load_default()
@@ -189,7 +189,7 @@ def generate_stats_image(stats):
     draw.text(((width - logo_width)//2, 16), logo_text, fill=(55, 93, 194), font=font_logo)
 
     # Заголовок під лого
-    header_text = replace_ukr_i("Статистика подій (Останні 7 та 30 днів)")
+    header_text = replace_ukr_i("Статистика подій")
     header_bbox = draw.textbbox((0,0), header_text, font=font_header)
     header_width = header_bbox[2] - header_bbox[0]
     draw.text(((width-header_width)//2, 60), header_text, fill=(33,53,85), font=font_header)
@@ -197,7 +197,7 @@ def generate_stats_image(stats):
     # Отступи та список проиществій
     y = header_height + margin
     for cat, v in stats.items():
-        line = f"{cat}:\n   За 7 днlв — {v['week']}\n   За 30 днlв — {v['month']}"
+        line = f"{cat}:\n   За 7 днlв — {v['week']}   За 30 днlв — {v['month']}"
         draw.text((margin, y), line, fill=(44,62,80), font=font_line)
         y += line_height + 14  # дополнительный отступ
 
