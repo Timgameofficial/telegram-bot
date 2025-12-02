@@ -173,9 +173,9 @@ def generate_stats_image(stats):
     draw = ImageDraw.Draw(img)
 
     try:
-        font_header = ImageFont.truetype(FONT_PATH, 5)
+        font_header = ImageFont.truetype(FONT_PATH, 15)
         font_logo = ImageFont.truetype(FONT_PATH, 30)
-        font_line = ImageFont.truetype(FONT_PATH, 5)
+        font_line = ImageFont.truetype(FONT_PATH, 15)
     except Exception:
         font_header = ImageFont.load_default()
         font_logo = ImageFont.load_default()
