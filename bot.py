@@ -375,9 +375,9 @@ def webhook():
                 elif text == "📊 Статистика подій":
                     stats = get_stats()
                     if stats:
-                        msg = "<b>Статистика за 7 та 30 днів:</b>\n"
+                        msg = "Статистика за 7 та 30 днів:\n"
                         for cat in ADMIN_SUBCATEGORIES:
-                            msg += f"{cat}: за 7 днів — <b>{stats[cat]['week']}</b>, за 30 днів — <b>{stats[cat]['month']}</b>\n"
+                            msg += f"{cat}: за 7 днів — {stats[cat]['week']}, за 30 днів — {stats[cat]['month']}\n"
                         send_message(chat_id, msg)
                     else:
                         send_message(chat_id, "Наразі статистика недоступна.")
