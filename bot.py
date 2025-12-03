@@ -1,4 +1,4 @@
-# contents: updated ADMIN_SUBCATEGORIES with new categories and emojis
+# contents: updated ADMIN_SUBCATEGORIES with new categories and emojis and improved stats formatting
 import os
 import time
 import json
@@ -7,6 +7,7 @@ import threading
 import traceback
 import datetime
 from flask import Flask, request
+from html import escape
 
 # ====== Логування ======
 def MainProtokol(s, ts='Запис'):
@@ -17,40 +18,49 @@ def MainProtokol(s, ts='Запис'):
     except Exception as e:
         print("Помилка запису в лог:", e)
 
-# ====== Крутий обробник помилок ======
-def cool_error_handler(exc, context=""):
+# ====== Простой и понятный обработчик ошибок ======
+def cool_error_handler(exc, context="", send_to_telegram=False):
     exc_type = type(exc).__name__
     tb_str = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    msg = (
-        f"\n{'='*40}\n"
-        f"[CRITICAL ERROR]: {exc_type}\n"
-        f"Контекст: {context}\n"
-        f"Час: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"Traceback:\n{tb_str}\n"
-        f"{'='*40}\n"
+    ts = time.strftime('%Y-%m-%d %H:%M:%S')
+    readable_msg = (
+        "\n" + "=" * 40 + "\n"
+        f"[ERROR] {exc_type}\n"
+        f"Context: {context}\n"
+        f"Time: {ts}\n"
+        "Traceback:\n"
+        f"{tb_str}"
+        + "=" * 40 + "\n"
     )
     try:
         with open('critical_errors.log', 'a', encoding='utf-8') as f:
-            f.write(msg)
-    except Exception as e:
-        print("Помилка при запису критичної помилки:", e)
-    MainProtokol(msg, ts='CRITICAL ERROR')
-    print(msg)
-    admin_id = int(os.getenv("ADMIN_ID", "0"))
-    token = os.getenv("API_TOKEN")
-    if admin_id and token:
+            f.write(readable_msg)
+    except Exception as write_err:
+        print("Не удалось записать в 'critical_errors.log':", write_err)
+    try:
+        MainProtokol(f"{exc_type}: {str(exc)}", ts='ERROR')
+    except Exception as log_err:
+        print("MainProtokol вернул ошибку:", log_err)
+    print(readable_msg)
+    if send_to_telegram:
         try:
-            requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data={
-                    "chat_id": admin_id,
-                    "text": f"⚠️ Критична помилка!\nТип: {exc_type}\nКонтекст: {context}\n\n{str(exc)}",
-                    "disable_web_page_preview": True
-                },
-                timeout=5
-            )
-        except Exception as e:
-            print("Помилка при надсиланні помилки адміну:", e)
+            admin_id = int(os.getenv("ADMIN_ID", "0"))
+            token = os.getenv("API_TOKEN")
+            if admin_id and token:
+                try:
+                    requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        data={
+                            "chat_id": admin_id,
+                            "text": f"⚠️ Критична помилка!\nТип: {exc_type}\nКонтекст: {context}\n\n{str(exc)}",
+                            "disable_web_page_preview": True
+                        },
+                        timeout=5
+                    )
+                except Exception as telegram_err:
+                    print("Не удалось отправить уведомление в Telegram:", telegram_err)
+        except Exception as env_err:
+            print("Ошибка при подготовке уведомления в Telegram:", env_err)
 
 # ====== Відладка часу в консоль (фоновий потік, кожні 5 хвилин) ======
 def time_debugger():
@@ -180,8 +190,8 @@ def set_webhook():
 
 set_webhook()
 
-# ====== Надсилання повідомлень ======
-def send_message(chat_id, text, reply_markup=None):
+# ====== Надсилання повідомлень (добавлен parse_mode) ======
+def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
     payload = {
         'chat_id': chat_id,
@@ -189,6 +199,8 @@ def send_message(chat_id, text, reply_markup=None):
     }
     if reply_markup:
         payload['reply_markup'] = json.dumps(reply_markup)
+    if parse_mode:
+        payload['parse_mode'] = parse_mode
     try:
         resp = requests.post(url, data=payload)
         if not resp.ok:
@@ -293,6 +305,26 @@ def flask_global_error_handler(e):
     cool_error_handler(e, context="Flask global error handler")
     return "Внутрішня помилка сервера. Адміністратору надіслано повідомлення.", 500
 
+def format_stats_message(stats: dict) -> str:
+    """
+    Формирует аккуратную таблицу в моноширинном формате, оборачивает в HTML <pre>.
+    Вернёт строку готовую для отправки с parse_mode='HTML'.
+    """
+    # Подготовим заголовок и строки, выравнивание по колонкам
+    # ширина колонки для названия категории определяется по самым длинным строкам
+    cat_names = [c for c in ADMIN_SUBCATEGORIES]
+    max_cat_len = max(len(escape(c)) for c in cat_names) + 1
+    col1 = "Категорія".ljust(max_cat_len)
+    header = f"{col1}  {'7 дн':>6}  {'30 дн':>6}"
+    lines = [header, "-" * (max_cat_len + 16)]
+    for cat in ADMIN_SUBCATEGORIES:
+        name = escape(cat)
+        week = stats[cat]['week']
+        month = stats[cat]['month']
+        lines.append(f"{name.ljust(max_cat_len)}  {str(week):>6}  {str(month):>6}")
+    content = "\n".join(lines)
+    return "<pre>" + content + "</pre>"
+
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
     try:
@@ -370,16 +402,14 @@ def webhook():
                 elif text == "📝 Повідомити про подію":
                     send_message(
                         chat_id,
-                        "Оберіть тип події, яку хочете повідомити: \n Техногенні: Події, пов'язані з діяльністю людини (аварії, катастрофи на виробництві/транспорті).\n\n Природні: Події, спричинені силами природи (землетруси, повені, буревії).\n\n Соціальні: Події, пов'язані з суспільними конфліктами або масовими заворушеннями.\n\n Воєнні: Події, пов'язані з військовими діями або конфліктами.\n\n Розшук: Дії, спрямовані на пошук зниклих осіб або злочинців.\n\n Інші події: Загальна категорія для всього, що не вписується в попередні визначення.",
+                        "Оберіть тип події, яку хочете повідомити: \n Техногенні: Події, пов'язані з діяльністю людини (ава[...]
                         reply_markup=get_admin_subcategory_buttons()
                     )
                 elif text == "📊 Статистика подій":
                     stats = get_stats()
                     if stats:
-                        msg = "Статистика за 7 та 30 днів:\n"
-                        for cat in ADMIN_SUBCATEGORIES:
-                            msg += f"{cat}: за 7 днів — {stats[cat]['week']}, за 30 днів — {stats[cat]['month']}\n"
-                        send_message(chat_id, msg)
+                        msg = format_stats_message(stats)
+                        send_message(chat_id, msg, parse_mode='HTML')
                     else:
                         send_message(chat_id, "Наразі статистика недоступна.")
             elif text in ADMIN_SUBCATEGORIES:
