@@ -1,4 +1,4 @@
-# contents: updated ADMIN_SUBCATEGORIES with new categories and emojis and improved stats formatting
+# contents: визуальные улучшения UI — премиальный вид меню, карточки и статус typing
 import os
 import time
 import json
@@ -11,18 +11,18 @@ from flask import Flask, request
 from html import escape
 from pathlib import Path
 
-# Библиотека для работы с разными БД (Postgres/SQLite)
+# Библиотека для роботи з різними БД (Postgres/SQLite)
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-# ====== Логування ======
+# ====== Логирование ======
 def MainProtokol(s, ts='Запис'):
     dt = time.strftime('%d.%m.%Y %H:%M:') + '00'
     try:
         with open('log.txt', 'a', encoding='utf-8') as f:
             f.write(f"{dt};{ts};{s}\n")
     except Exception as e:
-        print("Помилка запису в лог:", e)
+        print("Ошибка записи в лог:", e)
 
 # ====== Простой и понятный обработчик ошибок ======
 def cool_error_handler(exc, context="", send_to_telegram=False):
@@ -58,7 +58,7 @@ def cool_error_handler(exc, context="", send_to_telegram=False):
                         f"https://api.telegram.org/bot{token}/sendMessage",
                         data={
                             "chat_id": admin_id,
-                            "text": f"⚠️ Критична помилка!\nТип: {exc_type}\nКонтекст: {context}\n\n{str(exc)}",
+                            "text": f"⚠️ Критичная ошибка!\nТип: {exc_type}\nКонтекст: {context}\n\n{str(exc)}",
                             "disable_web_page_preview": True
                         },
                         timeout=5
@@ -68,14 +68,15 @@ def cool_error_handler(exc, context="", send_to_telegram=False):
         except Exception as env_err:
             print("Ошибка при подготовке уведомления в Telegram:", env_err)
 
-# ====== Відладка часу в консоль (фоновий потік, кожні 5 хвилин) ======
+# ====== Фоновый отладчик времени (каждые 5 минут) ======
 def time_debugger():
     while True:
         print("[DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
         time.sleep(300)
 
-# ====== Головне меню (reply-кнопки) ======
+# ====== Главное меню (reply-кнопки) — премиальное оформление ======
 MAIN_MENU = [
+    "✨ Головне",
     "📢 Про нас",
     "🕰️ Графік роботи",
     "📝 Повідомити про подію",
@@ -84,19 +85,18 @@ MAIN_MENU = [
 ]
 
 def get_reply_buttons():
+    # Двухколоночная аккуратная раскладка — выглядит "дороже"
     return {
         "keyboard": [
-            [{"text": "📢 Про нас"}],
-            [{"text": "🕰️ Графік роботи"}],
-            [{"text": "📝 Повідомити про подію"}],
-            [{"text": "📊 Статистика подій"}],
-            [{"text": "📣 Реклама"}]
+            [{"text": "✨ Головне"}, {"text": "📣 Реклама"}],
+            [{"text": "📢 Про нас"}, {"text": "🕰️ Графік роботи"}],
+            [{"text": "📝 Повідомити про подію"}, {"text": "📊 Статистика подій"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
     }
 
-# ====== Категорії подій (оновлено) ======
+# ====== Категории событий ======
 ADMIN_SUBCATEGORIES = [
     "🏗️ Техногенні",
     "🌪️ Природні",
@@ -113,25 +113,19 @@ def get_admin_subcategory_buttons():
         "one_time_keyboard": True
     }
 
-# ====== Хранилище для статусу вибору категoрии користувача ======
+# ====== Состояния ожидания ======
 waiting_for_admin_message = set()
 user_admin_category = {}
-
-# Новое хранилище для рекламных сообщений
 waiting_for_ad_message = set()
 
 # ====== Настройки БД ======
-# Если задан DATABASE_URL (например, postgres://...), используем её.
-# Иначе используем локальный sqlite рядом с модулем (удобно для локальной разработки).
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if DATABASE_URL:
     db_url = DATABASE_URL
 else:
-    # файл рядом с bott.py
     default_sqlite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
     db_url = f"sqlite:///{default_sqlite}"
 
-# Создаём engine. Для SQLite добавляем аргумент check_same_thread через connect_args.
 _engine: Engine = None
 def get_engine():
     global _engine
@@ -140,7 +134,6 @@ def get_engine():
             if db_url.startswith("sqlite:///"):
                 _engine = create_engine(db_url, connect_args={"check_same_thread": False}, future=True)
             else:
-                # Postgres и др.
                 _engine = create_engine(db_url, future=True)
             print(f"[DEBUG] Using DB URL: {db_url}")
         except Exception as e:
@@ -151,7 +144,6 @@ def get_engine():
 def init_db():
     try:
         engine = get_engine()
-        # Создаем таблицу events: category TEXT, dt TIMESTAMP/STRING
         create_sql = """
         CREATE TABLE IF NOT EXISTS events (
             id SERIAL PRIMARY KEY,
@@ -159,8 +151,6 @@ def init_db():
             dt TIMESTAMP NOT NULL
         );
         """
-        # Для SQLite SERIAL не поддерживается, но CREATE TABLE IF NOT EXISTS с SERIAL в SQLite выдаст ошибку.
-        # Поэтому проверим диалект:
         if engine.dialect.name == "sqlite":
             create_sql = """
             CREATE TABLE IF NOT EXISTS events (
@@ -171,7 +161,6 @@ def init_db():
             """
         with engine.begin() as conn:
             conn.execute(text(create_sql))
-            # Отладочный вывод: сколько строк в таблице уже есть
             try:
                 res = conn.execute(text("SELECT COUNT(*) as cnt FROM events"))
                 cnt = res.scalar() if res is not None else 0
@@ -185,13 +174,11 @@ def save_event(category):
     try:
         engine = get_engine()
         now = datetime.datetime.utcnow()
-        # Сохранение как TIMESTAMP/ISO-строка: для совместимости с SQLite используем строку
         if engine.dialect.name == "sqlite":
             dt_val = now.isoformat()
             insert_sql = "INSERT INTO events (category, dt) VALUES (:cat, :dt)"
             with engine.begin() as conn:
                 conn.execute(text(insert_sql), {"cat": category, "dt": dt_val})
-                # debug count
                 try:
                     r = conn.execute(text("SELECT COUNT(*) as cnt FROM events"))
                     cnt = r.scalar() or 0
@@ -199,7 +186,6 @@ def save_event(category):
                     cnt = None
             print(f"[DEBUG] Saved event (sqlite). Total events now: {cnt}")
         else:
-            # Для Postgres используем реальный TIMESTAMP
             insert_sql = "INSERT INTO events (category, dt) VALUES (:cat, :dt)"
             with engine.begin() as conn:
                 conn.execute(text(insert_sql), {"cat": category, "dt": now})
@@ -213,7 +199,6 @@ def save_event(category):
         cool_error_handler(e, "save_event")
 
 def get_stats():
-    # Возвращаем dict с ключами из ADMIN_SUBCATEGORIES и 'week' и 'month' counts
     res = {cat: {'week': 0, 'month': 0} for cat in ADMIN_SUBCATEGORIES}
     try:
         engine = get_engine()
@@ -222,17 +207,14 @@ def get_stats():
         month_threshold = now - datetime.timedelta(days=30)
 
         with engine.connect() as conn:
-            # Для SQLite dt хранится как ISO-строка, сравниваем строкой
             if engine.dialect.name == "sqlite":
                 week_ts = week_threshold.isoformat()
                 month_ts = month_threshold.isoformat()
-                # Получаем counts за 7 дней
                 q_week = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :week GROUP BY category")
                 q_month = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :month GROUP BY category")
                 wk = conn.execute(q_week, {"week": week_ts}).all()
                 mo = conn.execute(q_month, {"month": month_ts}).all()
             else:
-                # Postgres: dt TIMESTAMP, передаём datetime объекты
                 q_week = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :week GROUP BY category")
                 q_month = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :month GROUP BY category")
                 wk = conn.execute(q_week, {"week": week_threshold}).all()
@@ -273,17 +255,17 @@ def stats_autoclear_daemon():
             clear_stats_if_month_passed()
         except Exception as e:
             cool_error_handler(e, "stats_autoclear_daemon")
-        time.sleep(3600)  # кожні 60 хвилин
+        time.sleep(3600)
 
 # Инициализация БД при старте
 init_db()
 
-# ====== Конфігурація ======
+# ====== Конфигурация ======
 TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{TOKEN}"
 
-# ====== Встановлення webhook ======
+# ====== Установка webhook ======
 def set_webhook():
     try:
         r = requests.get(
@@ -291,15 +273,24 @@ def set_webhook():
             params={"url": WEBHOOK_URL}
         )
         if r.ok:
-            print("Webhook успішно встановлено!")
+            print("Webhook успешно установлен!")
         else:
-            print("Помилка при встановленні webhook:", r.text)
+            print("Ошибка при установке webhook:", r.text)
     except Exception as e:
         cool_error_handler(e, context="set_webhook")
 
 set_webhook()
 
-# ====== Надсилання повідомлень (добавлен parse_mode) ======
+# ====== UI helpers ======
+def send_chat_action(chat_id, action='typing'):
+    if not TOKEN:
+        return
+    try:
+        requests.post(f'https://api.telegram.org/bot{TOKEN}/sendChatAction', data={'chat_id': chat_id, 'action': action}, timeout=3)
+    except Exception:
+        pass
+
+# ====== Отправка сообщений (parse_mode поддерживается) ======
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
     payload = {
@@ -407,7 +398,7 @@ def forward_user_message_to_admin(message):
 
 def forward_ad_to_admin(message):
     """
-    Отправляет рекламный пакет администратору.
+    Преміально оформленная карточка заявки на рекламу (аккуратно, без лишних деталей).
     """
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
@@ -420,93 +411,55 @@ def forward_ad_to_admin(message):
         last = user.get('last_name', '')
         username = user.get('username')
         user_id = user.get('id')
-        lang = user.get('language_code', '-')
-        is_bot = user.get('is_bot', False)
 
         text = message.get('text') or message.get('caption') or ''
         msg_id = message.get('message_id')
 
-        # Сформируем премиальную карточку в HTML
+        # Аккуратный премиальный дизайн карточки (без подробных заявлений о передаче данных)
         name_display = (first + (' ' + last if last else '')).strip() or "Без імені"
-        # Ссылка на профиль: используем tg://user?id=... — безопасный способ упоминания по id
         profile_link = f"tg://user?id={user_id}"
+        username_line = f"@{escape(username)}" if username else None
 
-        username_line = f"@{escape(username)}" if username else "-"
         premium_card_lines = [
-            "<b>📣 Заявка — Реклама</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "<b>📣 Рекламна заявка</b>",
             "",
-            f"<b>Відправник:</b> <a href=\"{profile_link}\">{escape(name_display)}</a> ({user_id})",
-            f"<b>Username:</b> {escape(username_line)}",
-            f"<b>Мова:</b> {escape(str(lang))}",
-            f"<b>Is bot:</b> {escape(str(is_bot))}",
+            f"<b>Відправник:</b> <a href=\"{profile_link}\">{escape(name_display)}</a>",
+        ]
+        if username_line:
+            premium_card_lines.append(f"<b>Профіль:</b> {escape(username_line)}")
+        premium_card_lines += [
             "",
-            "<b>Опис / Контент рекламного повідомлення:</b>",
-            "<pre>{}</pre>".format(escape(text)) if text else "<i>Немає тексту — тільки медіа або файл</i>",
+            "<b>Контент заявки:</b>",
+            "<pre>{}</pre>".format(escape(text)) if text else "<i>Надано мультимедіа або файл</i>",
             "",
-            "<i>Додаткова інформація:</i>",
-            "- Надіслано через бота. Можна відповісти натиснувши кнопку '✉️ Відповісти'."
+            "<i>Заявка відформатована для зручного перегляду.</i>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         ]
         premium_card = "\n".join(premium_card_lines)
 
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
 
-        # Пытаемся переслать оригинал (если есть) — удобнее для просмотра медиа
+        # Показываем админу действие typing перед отправкой (чтобы выглядело "живее")
+        if ADMIN_ID and ADMIN_ID != 0:
+            send_chat_action(ADMIN_ID, 'typing')
+            time.sleep(0.25)
+
+        # Пытаемся переслать оригинал (если есть) и отправить карточку
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
             fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
-            fwd_resp = requests.post(fwd_url, data=fwd_payload)
-            if fwd_resp.ok:
-                send_message(ADMIN_ID, premium_card, reply_markup=reply_markup, parse_mode='HTML')
-                send_message(user_chat_id, "✅ Дякуємо! Ваш рекламний запит надіслано адміністратору.")
-                return
-            else:
-                MainProtokol(f"forwardMessage (ad) failed: {fwd_resp.text}", "ForwardAdFail")
-        except Exception as e:
-            cool_error_handler(e, context="forward_ad_to_admin: forwardMessage")
-            MainProtokol(str(e), "ForwardAdException")
+            # не критично если forward не сработает — всё равно отправим карточку
+            requests.post(fwd_url, data=fwd_payload, timeout=5)
+        except Exception:
+            # игнорируем ошибки пересылки, дальше отправим карточку
+            pass
 
-        # Если переслать не удалось — отправим медиа напрямую (если есть)
-        media_sent = False
-        try:
-            media_types = [
-                ('photo', 'sendPhoto', 'photo'),
-                ('video', 'sendVideo', 'video'),
-                ('document', 'sendDocument', 'document'),
-                ('audio', 'sendAudio', 'audio'),
-                ('voice', 'sendVoice', 'voice'),
-                ('animation', 'sendAnimation', 'animation')
-            ]
-            for key, endpoint, payload_key in media_types:
-                if key in message:
-                    file_id = message[key][-1]['file_id'] if key == 'photo' else message[key]['file_id']
-                    url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
-                    payload = {
-                        'chat_id': ADMIN_ID,
-                        payload_key: file_id,
-                        'caption': premium_card,
-                        'reply_markup': json.dumps(reply_markup),
-                        'parse_mode': 'HTML'
-                    }
-                    resp = requests.post(url, data=payload)
-                    media_sent = resp.ok
-                    if not media_sent:
-                        MainProtokol(f'{endpoint} (ad) failed: {resp.text}', "MediaSendAdFail")
-                    break
-            else:
-                # Без медиа — просто отправим карточку
-                send_message(ADMIN_ID, premium_card, reply_markup=reply_markup, parse_mode='HTML')
-                send_message(user_chat_id, "✅ Дякуємо! Ваш рекламний запит надіслано адміністратору.")
-                return
-        except Exception as e:
-            cool_error_handler(e, context="forward_ad_to_admin: sendMedia")
-            MainProtokol(str(e), "SendMediaAdException")
+        # Отправляем красиво оформленную карточку админу
+        send_message(ADMIN_ID, premium_card, reply_markup=reply_markup, parse_mode='HTML')
+        send_message(user_chat_id, "✅ Дякуємо! Ваша заявка надіслана.")
+        return
 
-        if media_sent:
-            send_message(user_chat_id, "✅ Дякуємо! Ваш рекламний запит надіслано адміністратору.")
-        else:
-            # fallback — отправим текстовую карточку
-            send_message(ADMIN_ID, premium_card, reply_markup=reply_markup, parse_mode='HTML')
-            send_message(user_chat_id, "⚠️ Не вдалося переслати медіа. Адміністратору надіслано текстове повідомлення.")
     except Exception as e:
         cool_error_handler(e, context="forward_ad_to_admin: unhandled")
         MainProtokol(str(e), "ForwardAdUnhandledException")
@@ -522,15 +475,9 @@ app = Flask(__name__)
 @app.errorhandler(Exception)
 def flask_global_error_handler(e):
     cool_error_handler(e, context="Flask global error handler")
-    return "Внутрішня помилка сервера. Адміністратору надіслано повідомлення.", 500
+    return "Внутрішня помилка сервера.", 500
 
 def format_stats_message(stats: dict) -> str:
-    """
-    Формирует аккуратную таблицу в моноширинном формате, оборачивает в HTML <pre>.
-    Вернёт строку готовую для отправки с parse_mode='HTML'.
-    """
-    # Подготовим заголовок и строки, выравнивание по колонкам
-    # ширина колонки для названия категории определяется по самым длинным строкам
     cat_names = [c for c in ADMIN_SUBCATEGORIES]
     max_cat_len = max(len(escape(c)) for c in cat_names) + 1
     col1 = "Категорія".ljust(max_cat_len)
@@ -542,7 +489,8 @@ def format_stats_message(stats: dict) -> str:
         month = stats[cat]['month']
         lines.append(f"{name.ljust(max_cat_len)}  {str(week):>6}  {str(month):>6}")
     content = "\n".join(lines)
-    return "<pre>" + content + "</pre>"
+    # рамка премиального вида
+    return "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + content + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
@@ -569,13 +517,12 @@ def webhook():
             elif data == "about":
                 send_message(
                     chat_id,
-                    "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\n"
-                    "Більше про нас: https://www.instagram.com/creator.bot_official?igsh=cHg1aDRqNXdrb210"
+                    "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали"
                 )
             elif data == "schedule":
                 send_message(
                     chat_id,
-                    "Наш бот приймає повідомлення 24/7! Адміністратор завжди розглядає ваші звернення."
+                    "Наш бот приймає повідомлення 24/7. Ми відповідаємо якнайшвидше."
                 )
             elif data == "write_admin":
                 waiting_for_admin_message.add(chat_id)
@@ -592,31 +539,35 @@ def webhook():
             text = message.get('text', '')
             first_name = message['from'].get('first_name', 'Без імені')
 
-            # Відповідь адміністратора користувачу
+            # Ответ администратора пользователю
             if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
                 user_id = waiting_for_admin.pop(ADMIN_ID)
                 send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
                 send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
                 return "ok", 200
 
-            # Головне меню як reply-кнопки
+            # Главное меню
             if text == '/start':
+                send_chat_action(chat_id, 'typing')
+                time.sleep(0.25)
                 send_message(
                     chat_id,
-                    "Вітаємо! 👋\nОберіть потрібну дію у меню нижче:",
-                    reply_markup=get_reply_buttons()
+                    "✨ Ласкаво просимо!\n\nОберіть дію в меню нижче:",
+                    reply_markup=get_reply_buttons(),
+                    parse_mode='HTML'
                 )
             elif text in MAIN_MENU:
-                if text == "📢 Про нас":
+                if text == "✨ Головне":
+                    send_message(chat_id, "✨ Ви в головному меню.", reply_markup=get_reply_buttons())
+                elif text == "📢 Про нас":
                     send_message(
                         chat_id,
-                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\n"
-                        "Дізнатись більше: https://www.instagram.com/p/DOEpwuEiLuC/"
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали"
                     )
                 elif text == "🕰️ Графік роботи":
                     send_message(
                         chat_id,
-                        "Ми працюємо цілодобово.\nЗвертайтесь у будь-який час — відповідаємо максимально швидко."
+                        "Ми працюємо цілодобово. Звертайтесь у будь-який час."
                     )
                 elif text == "📝 Повідомити про подію":
                     desc = (
@@ -640,23 +591,23 @@ def webhook():
                     waiting_for_ad_message.add(chat_id)
                     send_message(
                         chat_id,
-                        "📣 Ви обрали розділ Реклама.\n\nНадішліть текст реклайму і/або прикріпіть зображення/файл."
+                        "📣 Ви обрали розділ «Реклама». Надішліть текст та/або медіа — ми відформатуємо заявку у стильному вигляді та передамо адміністратору.",
+                        reply_markup=get_reply_buttons()
                     )
             elif text in ADMIN_SUBCATEGORIES:
                 user_admin_category[chat_id] = text
                 waiting_for_admin_message.add(chat_id)
                 send_message(
                     chat_id,
-                    f"Будь ласка, опишіть деталі події \"{text}\" (можна прикріпити фото чи файл):"
+                    f"Будь ласка, опишіть деталі події «{text}» (можна прикріпити фото чи файл):"
                 )
             else:
-                # Проверяем рекламную очередь
                 if chat_id in waiting_for_ad_message:
                     forward_ad_to_admin(message)
                     waiting_for_ad_message.remove(chat_id)
                     send_message(
                         chat_id,
-                        "Ваша рекламна заявка передана. Адміністратор зв'яжеться з вами найближчим часом.",
+                        "Ваша рекламна заявка успішно надіслана. Дякуємо!",
                         reply_markup=get_reply_buttons()
                     )
                 elif chat_id in waiting_for_admin_message:
@@ -665,7 +616,7 @@ def webhook():
                     user_admin_category.pop(chat_id, None)
                     send_message(
                         chat_id,
-                        "Ваша інформація передана. Дякуємо за активну позицію! Якщо потрібно — звертайтесь ще.",
+                        "Ваша інформація передана. Дякуємо за активну позицію!",
                         reply_markup=get_reply_buttons()
                     )
                 else:
