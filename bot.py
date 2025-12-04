@@ -426,11 +426,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
             f"<b>Entities:</b> {escape(entities_summary)}",
             f"<b>Reply to:</b> {escape(reply_info)}",
             f"<b>Медіа:</b> {escape(media_summary)}",
-        ]
-        if media_details:
-            parts.append(f"<b>Медіа деталі:</b> {escape('; '.join(media_details))}")
-        parts += [
-            "",
             "<b>Текст / Опис:</b>",
             "<pre>{}</pre>".format(escape(text)) if text else "<i>Немає тексту</i>",
             "",
@@ -660,7 +655,7 @@ def webhook():
                 elif text == "📢 Про нас":
                     send_message(
                         chat_id,
-                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали"
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: https://www.instagram.com/creator.bot_official?igsh=cHg1aDRqNXdrb210"
                     )
                 elif text == "🕰️ Графік роботи":
                     send_message(
