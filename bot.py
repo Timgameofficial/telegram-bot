@@ -1,4 +1,3 @@
-# contents: updated ADMIN_SUBCATEGORIES with new categories and emojis and improved stats formatting
 import os
 import time
 import json
@@ -9,6 +8,8 @@ import datetime
 import textwrap
 from flask import Flask, request
 from html import escape
+import sqlite3
+from pathlib import Path
 
 # ====== Логування ======
 def MainProtokol(s, ts='Запис'):
@@ -110,57 +111,64 @@ def get_admin_subcategory_buttons():
 waiting_for_admin_message = set()
 user_admin_category = {}
 
-# ====== Хранилище подій для статистики ======
-EVENTS_FILE = 'events.json'
+# ====== Хранилище подій для статистики (переключено на SQLite) ======
+# Файл БД по умолчанию — events.db, можно переопределить через ENV EVENTS_DB_FILE
+DB_FILE = os.getenv("EVENTS_DB_FILE", "events.db")
+
+def init_db():
+    try:
+        # Создаём файл/директорию если нужно
+        db_path = Path(DB_FILE)
+        if not db_path.parent.exists():
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    dt TEXT NOT NULL
+                );
+            """)
+            conn.commit()
+    except Exception as e:
+        cool_error_handler(e, "init_db")
 
 def save_event(category):
     try:
         now_iso = datetime.datetime.now().isoformat()
-        events = []
-        if os.path.exists(EVENTS_FILE):
-            with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
-                events = json.load(f)
-        events.append({"category": category, "dt": now_iso})
-        with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(events, f)
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("INSERT INTO events (category, dt) VALUES (?, ?)", (category, now_iso))
+            conn.commit()
     except Exception as e:
         cool_error_handler(e, "save_event")
 
 def get_stats():
     res = {cat: {'week': 0, 'month': 0} for cat in ADMIN_SUBCATEGORIES}
     now = datetime.datetime.now()
-    if os.path.exists(EVENTS_FILE):
-        try:
-            with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
-                events = json.load(f)
-            for ev in events:
-                cat = ev['category']
-                dt_ev = datetime.datetime.fromisoformat(ev['dt'])
-                if (now - dt_ev).days < 7:
-                    if cat in res:
-                        res[cat]['week'] += 1
-                if (now - dt_ev).days < 30:
-                    if cat in res:
-                        res[cat]['month'] += 1
-            return res
-        except Exception as e:
-            cool_error_handler(e, "get_stats")
-            return None
-    else:
+    week_threshold = (now - datetime.timedelta(days=7)).isoformat()
+    month_threshold = (now - datetime.timedelta(days=30)).isoformat()
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            for cat in ADMIN_SUBCATEGORIES:
+                cur.execute("SELECT COUNT(*) FROM events WHERE category = ? AND dt >= ?", (cat, week_threshold))
+                res[cat]['week'] = cur.fetchone()[0] or 0
+                cur.execute("SELECT COUNT(*) FROM events WHERE category = ? AND dt >= ?", (cat, month_threshold))
+                res[cat]['month'] = cur.fetchone()[0] or 0
         return res
+    except Exception as e:
+        cool_error_handler(e, "get_stats")
+        return None
 
 def clear_stats_if_month_passed():
     now = datetime.datetime.now()
-    if os.path.exists(EVENTS_FILE):
-        try:
-            with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
-                events = json.load(f)
-            events = [ev for ev in events
-                     if (now - datetime.datetime.fromisoformat(ev['dt'])).days < 30]
-            with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(events, f)
-        except Exception as e:
-            cool_error_handler(e, "clear_stats_if_month_passed")
+    month_threshold = (now - datetime.timedelta(days=30)).isoformat()
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("DELETE FROM events WHERE dt < ?", (month_threshold,))
+            conn.commit()
+    except Exception as e:
+        cool_error_handler(e, "clear_stats_if_month_passed")
 
 def stats_autoclear_daemon():
     while True:
@@ -169,6 +177,9 @@ def stats_autoclear_daemon():
         except Exception as e:
             cool_error_handler(e, "stats_autoclear_daemon")
         time.sleep(3600)  # кожні 60 хвилин
+
+# Инициализация БД при старте
+init_db()
 
 # ====== Конфігурація ======
 TOKEN = os.getenv("API_TOKEN")
@@ -316,158 +327,4 @@ def format_stats_message(stats: dict) -> str:
     cat_names = [c for c in ADMIN_SUBCATEGORIES]
     max_cat_len = max(len(escape(c)) for c in cat_names) + 1
     col1 = "Категорія".ljust(max_cat_len)
-    header = f"{col1}  {'7 дн':>6}  {'30 дн':>6}"
-    lines = [header, "-" * (max_cat_len + 16)]
-    for cat in ADMIN_SUBCATEGORIES:
-        name = escape(cat)
-        week = stats[cat]['week']
-        month = stats[cat]['month']
-        lines.append(f"{name.ljust(max_cat_len)}  {str(week):>6}  {str(month):>6}")
-    content = "\n".join(lines)
-    return "<pre>" + content + "</pre>"
-
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
-def webhook():
-    try:
-        data_raw = request.get_data(as_text=True)
-        update = json.loads(data_raw)
-
-        if 'callback_query' in update:
-            call = update['callback_query']
-            chat_id = call['from']['id']
-            data = call['data']
-
-            if data.startswith("reply_") and chat_id == ADMIN_ID:
-                try:
-                    user_id = int(data.split("_")[1])
-                    waiting_for_admin[ADMIN_ID] = user_id
-                    send_message(
-                        ADMIN_ID,
-                        f"✍️ Введіть відповідь для користувача {user_id}:"
-                    )
-                except Exception as e:
-                    cool_error_handler(e, context="webhook: callback_query reply_")
-                    MainProtokol(str(e), 'Помилка callback reply')
-            elif data == "about":
-                send_message(
-                    chat_id,
-                    "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\n"
-                    "Більше про нас: https://www.instagram.com/p/DOEpwuEiLuC/"
-                )
-            elif data == "schedule":
-                send_message(
-                    chat_id,
-                    "Наш бот приймає повідомлення 24/7! Адміністратор завжди розглядає ваші звернення."
-                )
-            elif data == "write_admin":
-                waiting_for_admin_message.add(chat_id)
-                send_message(
-                    chat_id,
-                    "✍️ Напишіть повідомлення адміністратору (текст/фото/документ):"
-                )
-            return "ok", 200
-
-        if 'message' in update:
-            message = update['message']
-            chat_id = message['chat']['id']
-            from_id = message['from']['id']
-            text = message.get('text', '')
-            first_name = message['from'].get('first_name', 'Без імені')
-
-            # Відповідь адміністратора користувачу
-            if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
-                user_id = waiting_for_admin.pop(ADMIN_ID)
-                send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
-                send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
-                return "ok", 200
-
-            # Головне меню як reply-кнопки
-            if text == '/start':
-                send_message(
-                    chat_id,
-                    "Вітаємо! 👋\nОберіть потрібну дію у меню нижче:",
-                    reply_markup=get_reply_buttons()
-                )
-            elif text in MAIN_MENU:
-                if text == "📢 Про нас":
-                    send_message(
-                        chat_id,
-                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\n"
-                        "Дізнатись більше: https://www.instagram.com/p/DOEpwuEiLuC/"
-                    )
-                elif text == "🕰️ Графік роботи":
-                    send_message(
-                        chat_id,
-                        "Ми працюємо цілодобово.\nЗвертайтесь у будь-який час — відповідаємо максимально швидко."
-                    )
-                elif text == "📝 Повідомити про подію":
-                    desc = (
-                        "Оберіть тип події, яку хочете повідомити:\n\n"
-                        "Техногенні: Події, пов'язані з діяльністю людини (аварії, катастрофи на виробництві/транспорті).\n\n"
-                        "Природні: Події, спричинені силами природи (землетруси, повені, буревії).\n\n"
-                        "Соціальні: Події, пов'язані з суспільними конфліктами або масовими заворушеннями.\n\n"
-                        "Воєнні: Події, пов'язані з військовими діями або конфліктами.\n\n"
-                        "Розшук: Дії, спрямовані на пошук зниклих осіб або злочинців.\n\n"
-                        "Інші події: Загальна категорія для всього, що не вписується в попередні визначення."
-                    )
-                    send_message(chat_id, desc, reply_markup=get_admin_subcategory_buttons())
-                elif text == "📊 Статистика подій":
-                    stats = get_stats()
-                    if stats:
-                        msg = format_stats_message(stats)
-                        send_message(chat_id, msg, parse_mode='HTML')
-                    else:
-                        send_message(chat_id, "Наразі статистика недоступна.")
-            elif text in ADMIN_SUBCATEGORIES:
-                user_admin_category[chat_id] = text
-                waiting_for_admin_message.add(chat_id)
-                send_message(
-                    chat_id,
-                    f"Будь ласка, опишіть деталі події \"{text}\" (можна прикріпити фото чи файл):"
-                )
-            else:
-                if chat_id in waiting_for_admin_message:
-                    forward_user_message_to_admin(message)
-                    waiting_for_admin_message.remove(chat_id)
-                    user_admin_category.pop(chat_id, None)
-                    send_message(
-                        chat_id,
-                        "Ваша інформація передана. Дякуємо за активну позицію! Якщо потрібно — звертайтесь ще.",
-                        reply_markup=get_reply_buttons()
-                    )
-                else:
-                    send_message(
-                        chat_id,
-                        "Щоб повідомити адміна, спочатку натисніть кнопку «📝 Повідомити про подію» в меню.",
-                        reply_markup=get_reply_buttons()
-                    )
-        return "ok", 200
-
-    except Exception as e:
-        cool_error_handler(e, context="webhook - outer")
-        MainProtokol(str(e), 'Помилка webhook')
-        return "ok", 200
-
-@app.route('/', methods=['GET'])
-def index():
-    try:
-        MainProtokol('Відвідання сайту')
-        return "Бот працює", 200
-    except Exception as e:
-        cool_error_handler(e, context="index route")
-        return "Error", 500
-
-if __name__ == "__main__":
-    try:
-        threading.Thread(target=time_debugger, daemon=True).start()
-    except Exception as e:
-        cool_error_handler(e, context="main: start time_debugger")
-    try:
-        threading.Thread(target=stats_autoclear_daemon, daemon=True).start()
-    except Exception as e:
-        cool_error_handler(e, context="main: start stats_autoclear_daemon")
-    port = int(os.getenv("PORT", 5000))
-    try:
-        app.run(host="0.0.0.0", port=port)
-    except Exception as e:
-        cool_error_handler(e, context="main: app.run")
+    header = f"{col1}  {'7 дн':>6}  {'30 дн':>
