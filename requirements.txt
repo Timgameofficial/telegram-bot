@@ -2,4 +2,6 @@ Flask>=2.3
 python-telegram-bot==20.7
 gunicorn>=21.2
 requests
-Pillow
+requests>=2.25
+SQLAlchemy>=1.4
+psycopg2-binary>=2.9
