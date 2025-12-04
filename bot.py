@@ -9,8 +9,11 @@ import datetime
 import textwrap
 from flask import Flask, request
 from html import escape
-import sqlite3
 from pathlib import Path
+
+# Библиотека для работы с разными БД (Postgres/SQLite)
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
 # ====== Логування ======
 def MainProtokol(s, ts='Запис'):
@@ -112,62 +115,150 @@ def get_admin_subcategory_buttons():
 waiting_for_admin_message = set()
 user_admin_category = {}
 
-# ====== Хранилище подій для статистики (переключено на SQLite) ======
-# Файл БД по умолчанию — events.db, можно переопределить через ENV EVENTS_DB_FILE
-DB_FILE = os.getenv("EVENTS_DB_FILE", "events.db")
+# ====== Настройки БД ======
+# Если задан DATABASE_URL (например, postgres://...), используем её.
+# Иначе используем локальный sqlite рядом с модулем (удобно для локальной разработки).
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if DATABASE_URL:
+    db_url = DATABASE_URL
+else:
+    # файл рядом с bott.py
+    default_sqlite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
+    db_url = f"sqlite:///{default_sqlite}"
+
+# Создаём engine. Для SQLite добавляем аргумент check_same_thread через connect_args.
+_engine: Engine = None
+def get_engine():
+    global _engine
+    if _engine is None:
+        try:
+            if db_url.startswith("sqlite:///"):
+                _engine = create_engine(db_url, connect_args={"check_same_thread": False}, future=True)
+            else:
+                # Postgres и др.
+                _engine = create_engine(db_url, future=True)
+            print(f"[DEBUG] Using DB URL: {db_url}")
+        except Exception as e:
+            cool_error_handler(e, "get_engine")
+            raise
+    return _engine
 
 def init_db():
     try:
-        # Создаём файл/директорию если нужно
-        db_path = Path(DB_FILE)
-        if not db_path.parent.exists():
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    category TEXT NOT NULL,
-                    dt TEXT NOT NULL
-                );
-            """)
-            conn.commit()
+        engine = get_engine()
+        # Создаем таблицу events: category TEXT, dt TIMESTAMP/STRING
+        create_sql = """
+        CREATE TABLE IF NOT EXISTS events (
+            id SERIAL PRIMARY KEY,
+            category TEXT NOT NULL,
+            dt TIMESTAMP NOT NULL
+        );
+        """
+        # Для SQLite SERIAL не поддерживается, но CREATE TABLE IF NOT EXISTS с SERIAL в SQLite выдаст ошибку.
+        # Поэтому проверим диалект:
+        if engine.dialect.name == "sqlite":
+            create_sql = """
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                dt TEXT NOT NULL
+            );
+            """
+        with engine.begin() as conn:
+            conn.execute(text(create_sql))
+            # Отладочный вывод: сколько строк в таблице уже есть
+            try:
+                res = conn.execute(text("SELECT COUNT(*) as cnt FROM events"))
+                cnt = res.scalar() if res is not None else 0
+            except Exception:
+                cnt = 0
+            print(f"[DEBUG] events table row count after init: {cnt}")
     except Exception as e:
         cool_error_handler(e, "init_db")
 
 def save_event(category):
     try:
-        now_iso = datetime.datetime.now().isoformat()
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute("INSERT INTO events (category, dt) VALUES (?, ?)", (category, now_iso))
-            conn.commit()
+        engine = get_engine()
+        now = datetime.datetime.utcnow()
+        # Сохранение как TIMESTAMP/ISO-строка: для совместимости с SQLite используем строку
+        if engine.dialect.name == "sqlite":
+            dt_val = now.isoformat()
+            insert_sql = "INSERT INTO events (category, dt) VALUES (:cat, :dt)"
+            with engine.begin() as conn:
+                conn.execute(text(insert_sql), {"cat": category, "dt": dt_val})
+                # debug count
+                try:
+                    r = conn.execute(text("SELECT COUNT(*) as cnt FROM events"))
+                    cnt = r.scalar() or 0
+                except Exception:
+                    cnt = None
+            print(f"[DEBUG] Saved event (sqlite). Total events now: {cnt}")
+        else:
+            # Для Postgres используем реальный TIMESTAMP
+            insert_sql = "INSERT INTO events (category, dt) VALUES (:cat, :dt)"
+            with engine.begin() as conn:
+                conn.execute(text(insert_sql), {"cat": category, "dt": now})
+                try:
+                    r = conn.execute(text("SELECT COUNT(*) FROM events"))
+                    cnt = r.scalar() or 0
+                except Exception:
+                    cnt = None
+            print(f"[DEBUG] Saved event (sql). Total events now: {cnt}")
     except Exception as e:
         cool_error_handler(e, "save_event")
 
 def get_stats():
+    # Возвращаем dict с ключами из ADMIN_SUBCATEGORIES и 'week' и 'month' counts
     res = {cat: {'week': 0, 'month': 0} for cat in ADMIN_SUBCATEGORIES}
-    now = datetime.datetime.now()
-    week_threshold = (now - datetime.timedelta(days=7)).isoformat()
-    month_threshold = (now - datetime.timedelta(days=30)).isoformat()
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cur = conn.cursor()
-            for cat in ADMIN_SUBCATEGORIES:
-                cur.execute("SELECT COUNT(*) FROM events WHERE category = ? AND dt >= ?", (cat, week_threshold))
-                res[cat]['week'] = cur.fetchone()[0] or 0
-                cur.execute("SELECT COUNT(*) FROM events WHERE category = ? AND dt >= ?", (cat, month_threshold))
-                res[cat]['month'] = cur.fetchone()[0] or 0
+        engine = get_engine()
+        now = datetime.datetime.utcnow()
+        week_threshold = now - datetime.timedelta(days=7)
+        month_threshold = now - datetime.timedelta(days=30)
+
+        with engine.connect() as conn:
+            # Для SQLite dt хранится как ISO-строка, сравниваем строкой
+            if engine.dialect.name == "sqlite":
+                week_ts = week_threshold.isoformat()
+                month_ts = month_threshold.isoformat()
+                # Получаем counts за 7 дней
+                q_week = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :week GROUP BY category")
+                q_month = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :month GROUP BY category")
+                wk = conn.execute(q_week, {"week": week_ts}).all()
+                mo = conn.execute(q_month, {"month": month_ts}).all()
+            else:
+                # Postgres: dt TIMESTAMP, передаём datetime объекты
+                q_week = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :week GROUP BY category")
+                q_month = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :month GROUP BY category")
+                wk = conn.execute(q_week, {"week": week_threshold}).all()
+                mo = conn.execute(q_month, {"month": month_threshold}).all()
+
+            for row in wk:
+                cat = row[0]
+                cnt = int(row[1])
+                if cat in res:
+                    res[cat]['week'] = cnt
+            for row in mo:
+                cat = row[0]
+                cnt = int(row[1])
+                if cat in res:
+                    res[cat]['month'] = cnt
         return res
     except Exception as e:
         cool_error_handler(e, "get_stats")
         return None
 
 def clear_stats_if_month_passed():
-    now = datetime.datetime.now()
-    month_threshold = (now - datetime.timedelta(days=30)).isoformat()
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute("DELETE FROM events WHERE dt < ?", (month_threshold,))
-            conn.commit()
+        engine = get_engine()
+        now = datetime.datetime.utcnow()
+        month_threshold = now - datetime.timedelta(days=30)
+        with engine.begin() as conn:
+            if engine.dialect.name == "sqlite":
+                month_ts = month_threshold.isoformat()
+                conn.execute(text("DELETE FROM events WHERE dt < :month"), {"month": month_ts})
+            else:
+                conn.execute(text("DELETE FROM events WHERE dt < :month"), {"month": month_threshold})
     except Exception as e:
         cool_error_handler(e, "clear_stats_if_month_passed")
 
