@@ -433,7 +433,7 @@ def forward_ad_to_admin(message):
 
         username_line = f"@{escape(username)}" if username else "-"
         premium_card_lines = [
-            "<b>📣 Преміальна заявка — Реклама</b>",
+            "<b>📣 Заявка — Реклама</b>",
             "",
             f"<b>Відправник:</b> <a href=\"{profile_link}\">{escape(name_display)}</a> ({user_id})",
             f"<b>Username:</b> {escape(username_line)}",
