@@ -1,4 +1,4 @@
-# contents: визуальные улучшения UI — премиальный вид меню, карточки и статус typing
+# contents: расширение информации, отправляемой админу — больше полей и аккуратное HTML-оформление
 import os
 import time
 import json
@@ -11,7 +11,7 @@ from flask import Flask, request
 from html import escape
 from pathlib import Path
 
-# Библиотека для роботи з різними БД (Postgres/SQLite)
+# Библиотека для работы с разными БД (Postgres/SQLite)
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
@@ -88,7 +88,7 @@ def get_reply_buttons():
     # Двухколоночная аккуратная раскладка — выглядит "дороже"
     return {
         "keyboard": [
-            [{"text": "✨ Головне"}, {"text": "📣 Реклама"}],
+            [{"text": "📣 Реклама"}],
             [{"text": "📢 Про нас"}, {"text": "🕰️ Графік роботи"}],
             [{"text": "📝 Повідомити про подію"}, {"text": "📊 Статистика подій"}]
         ],
@@ -317,6 +317,136 @@ def _get_reply_markup_for_admin(user_id: int):
         ]
     }
 
+# ====== Новый helper: строим расширённую карточку для админа ======
+def build_admin_info(message: dict, category: str = None) -> str:
+    """
+    Возвращает HTML-строку с расширённой информацией о сообщении и отправителе.
+    Использует только поля из update['message'] — не делает дополнительных API-вызовов.
+    """
+    try:
+        user = message.get('from', {})
+        chat = message.get('chat', {})
+        first = user.get('first_name', '') or ""
+        last = user.get('last_name', '') or ""
+        username = user.get('username')
+        user_id = user.get('id')
+        lang = user.get('language_code', '-')
+        is_bot = user.get('is_bot', False)
+        is_premium = user.get('is_premium', False) if isinstance(user.get('is_premium', None), bool) else user.get('is_premium', None)
+
+        chat_type = chat.get('type', '-')
+        chat_title = chat.get('title') or ''
+        msg_id = message.get('message_id')
+        msg_date = message.get('date')
+        try:
+            date_str = datetime.datetime.utcfromtimestamp(int(msg_date)).strftime('%Y-%m-%d %H:%M:%S UTC') if msg_date else '-'
+        except Exception:
+            date_str = str(msg_date or '-')
+
+        # Текст / caption
+        text = message.get('text') or message.get('caption') or ''
+        # Entities summary (if any)
+        entities = message.get('entities') or message.get('caption_entities') or []
+        entities_summary = []
+        for ent in entities:
+            etype = ent.get('type')
+            if etype:
+                entities_summary.append(etype)
+        entities_summary = ", ".join(entities_summary) if entities_summary else "-"
+
+        # Медиа summary: перечислим типы медиа и file_id(ы) для диагноза
+        media_keys = []
+        media_details = []
+        media_candidates = [
+            'photo', 'video', 'document', 'audio', 'voice', 'animation', 'sticker', 'contact', 'location'
+        ]
+        for k in media_candidates:
+            if k in message:
+                media_keys.append(k)
+                try:
+                    if k == 'photo':
+                        # photo — список размерностей
+                        photos = message.get('photo', [])
+                        file_ids = [p.get('file_id') for p in photos if p.get('file_id')]
+                        media_details.append(f"{k} (file_ids: {','.join(file_ids)})")
+                    elif k == 'contact':
+                        c = message.get('contact', {})
+                        media_details.append(f"contact ({escape(str(c.get('phone_number','-')))}: {escape(str(c.get('first_name','')))} )")
+                    elif k == 'location':
+                        loc = message.get('location', {})
+                        media_details.append(f"location (lat:{loc.get('latitude')}, lon:{loc.get('longitude')})")
+                    else:
+                        fid = message.get(k, {}).get('file_id') if isinstance(message.get(k), dict) else message.get(k, {}).get('file_id') if message.get(k) else None
+                        if isinstance(message.get(k), dict) and 'file_id' in message.get(k):
+                            media_details.append(f"{k} (file_id: {message[k].get('file_id')})")
+                        elif isinstance(message.get(k), list) and message.get(k) and isinstance(message.get(k)[-1], dict) and message.get(k)[-1].get('file_id'):
+                            media_details.append(f"{k} (file_id: {message[k][-1].get('file_id')})")
+                        else:
+                            # fallback
+                            media_details.append(f"{k}")
+                except Exception:
+                    media_details.append(k)
+
+        media_summary = ", ".join(media_keys) if media_keys else "-"
+
+        # reply_to_message summary
+        reply_info = "-"
+        if 'reply_to_message' in message and isinstance(message['reply_to_message'], dict):
+            r = message['reply_to_message']
+            rfrom = r.get('from', {})
+            rname = (rfrom.get('first_name','') or '') + ((' ' + rfrom.get('last_name')) if rfrom.get('last_name') else '')
+            reply_info = f"id:{r.get('message_id','-')} from:{escape(rname or '-')}"
+        # build HTML
+        parts = [
+            "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>",
+            "<b>📩 Нове повідомлення від користувача</b>",
+            "",
+        ]
+        if category:
+            parts.append(f"<b>Категорія:</b> {escape(category)}")
+        # user block
+        display_name = (first + (" " + last if last else "")).strip() or "Без імені"
+        parts += [
+            f"<b>Ім'я:</b> {escape(display_name)}",
+            f"<b>ID:</b> {escape(str(user_id)) if user_id is not None else '-'}",
+        ]
+        if username:
+            parts.append(f"<b>Username:</b> @{escape(username)}")
+        parts += [
+            f"<b>Мова:</b> {escape(str(lang))}",
+            f"<b>Is bot:</b> {escape(str(is_bot))}",
+        ]
+        if is_premium is not None:
+            parts.append(f"<b>Is premium:</b> {escape(str(is_premium))}")
+        # chat & message meta
+        parts += [
+            f"<b>Тип чату:</b> {escape(str(chat_type))}" + (f" ({escape(chat_title)})" if chat_title else ""),
+            f"<b>Message ID:</b> {escape(str(msg_id))}",
+            f"<b>Дата:</b> {escape(str(date_str))}",
+            f"<b>Entities:</b> {escape(entities_summary)}",
+            f"<b>Reply to:</b> {escape(reply_info)}",
+            f"<b>Медіа:</b> {escape(media_summary)}",
+        ]
+        if media_details:
+            parts.append(f"<b>Медіа деталі:</b> {escape('; '.join(media_details))}")
+        parts += [
+            "",
+            "<b>Текст / Опис:</b>",
+            "<pre>{}</pre>".format(escape(text)) if text else "<i>Немає тексту</i>",
+            "",
+            "<i>Повідомлення відформатовано для зручного перегляду.</i>",
+            "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
+        ]
+        # join with newlines. We will send using parse_mode='HTML'
+        return "\n".join(parts)
+    except Exception as e:
+        cool_error_handler(e, "build_admin_info")
+        # Fallback minimal info:
+        try:
+            return f"Повідомлення від користувача. ID: {escape(str(message.get('from', {}).get('id', '-')))}"
+        except Exception:
+            return "Нове повідомлення."
+
 def forward_user_message_to_admin(message):
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
@@ -324,32 +454,30 @@ def forward_user_message_to_admin(message):
             return
 
         user_chat_id = message['chat']['id']
-        user_first = message['from'].get('first_name', 'Без імені')
         msg_id = message.get('message_id')
-        text = message.get('text') or message.get('caption') or ''
         category = user_admin_category.get(user_chat_id, 'Без категорії')
-        admin_info = f"📩 Категорія: {category}\nВід: {user_first}\nID: {user_chat_id}"
-        if text:
-            admin_info += f"\n\n{text}"
+
+        # строим расширённую карточку
+        admin_info = build_admin_info(message, category=category)
 
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
         if category in ADMIN_SUBCATEGORIES:
             save_event(category)
 
+        # пытаемся переслать оригинал; но даже если не получится, отправим расширённую карточку
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
             fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
-            fwd_resp = requests.post(fwd_url, data=fwd_payload)
-            if fwd_resp.ok:
-                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
-                send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
-                return
-            else:
-                MainProtokol(f"forwardMessage failed: {fwd_resp.text}", "ForwardFail")
+            fwd_resp = requests.post(fwd_url, data=fwd_payload, timeout=5)
+            # отправляем карточку отдельно (чтобы всегда было форматирование)
+            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+            send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
+            return
         except Exception as e:
-            cool_error_handler(e, context="forward_user_message_to_admin: forwardMessage")
-            MainProtokol(str(e), "ForwardException")
+            MainProtokol(f"forwardMessage failed (user): {str(e)}", "ForwardFail")
+            # продолжим и отправим карточку
 
+        # попытка отправки медиа (если есть) с подписью admin_info
         media_sent = False
         try:
             media_types = [
@@ -358,36 +486,36 @@ def forward_user_message_to_admin(message):
                 ('document', 'sendDocument', 'document'),
                 ('audio', 'sendAudio', 'audio'),
                 ('voice', 'sendVoice', 'voice'),
-                ('animation', 'sendAnimation', 'animation')
+                ('animation', 'sendAnimation', 'animation'),
+                ('sticker', 'sendSticker', 'sticker')
             ]
             for key, endpoint, payload_key in media_types:
                 if key in message:
-                    file_id = message[key][-1]['file_id'] if key == 'photo' else message[key]['file_id']
+                    if key == 'photo':
+                        file_id = message[key][-1]['file_id']
+                    else:
+                        file_id = message[key]['file_id'] if isinstance(message[key], dict) else message[key].get('file_id')
                     url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
                     payload = {
                         'chat_id': ADMIN_ID,
                         payload_key: file_id,
                         'caption': admin_info,
-                        'reply_markup': json.dumps(reply_markup)
+                        'reply_markup': json.dumps(reply_markup),
+                        'parse_mode': 'HTML'
                     }
                     resp = requests.post(url, data=payload)
                     media_sent = resp.ok
                     if not media_sent:
                         MainProtokol(f'{endpoint} failed: {resp.text}', "MediaSendFail")
                     break
-            else:
-                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
-                send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
-                return
+            if not media_sent:
+                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+            send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
         except Exception as e:
             cool_error_handler(e, context="forward_user_message_to_admin: sendMedia")
             MainProtokol(str(e), "SendMediaException")
-
-        if media_sent:
-            send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
-        else:
-            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup)
-            send_message(user_chat_id, "⚠️ Не вдалося переслати медіа. Адміністратору надіслано текстове повідомлення.")
+            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+            send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст повідомлення.")
     except Exception as e:
         cool_error_handler(e, context="forward_user_message_to_admin: unhandled")
         MainProtokol(str(e), "ForwardUnhandledException")
@@ -398,68 +526,38 @@ def forward_user_message_to_admin(message):
 
 def forward_ad_to_admin(message):
     """
-    Преміально оформленная карточка заявки на рекламу (аккуратно, без лишних деталей).
+    Отправляет рекламную заявку админу с расширенной информацией (HTML).
+    Упрощённая формулировка для пользователя — админ получает подробную карточку.
     """
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
             send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
             return
 
-        user = message['from']
         user_chat_id = message['chat']['id']
-        first = user.get('first_name', '')
-        last = user.get('last_name', '')
-        username = user.get('username')
-        user_id = user.get('id')
-
-        text = message.get('text') or message.get('caption') or ''
-        msg_id = message.get('message_id')
-
-        # Аккуратный премиальный дизайн карточки (без подробных заявлений о передаче данных)
-        name_display = (first + (' ' + last if last else '')).strip() or "Без імені"
-        profile_link = f"tg://user?id={user_id}"
-        username_line = f"@{escape(username)}" if username else None
-
-        premium_card_lines = [
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "<b>📣 Рекламна заявка</b>",
-            "",
-            f"<b>Відправник:</b> <a href=\"{profile_link}\">{escape(name_display)}</a>",
-        ]
-        if username_line:
-            premium_card_lines.append(f"<b>Профіль:</b> {escape(username_line)}")
-        premium_card_lines += [
-            "",
-            "<b>Контент заявки:</b>",
-            "<pre>{}</pre>".format(escape(text)) if text else "<i>Надано мультимедіа або файл</i>",
-            "",
-            "<i>Заявка відформатована для зручного перегляду.</i>",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        ]
-        premium_card = "\n".join(premium_card_lines)
+        category = None  # для рекламы категория не используется, но можно передать
+        admin_info = build_admin_info(message, category=category)
 
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
 
-        # Показываем админу действие typing перед отправкой (чтобы выглядело "живее")
+        # Показываем админу "typing" перед отправкой
         if ADMIN_ID and ADMIN_ID != 0:
             send_chat_action(ADMIN_ID, 'typing')
             time.sleep(0.25)
 
-        # Пытаемся переслать оригинал (если есть) и отправить карточку
+        # Пытаемся переслать оригинал (если есть), но в любом случае отправим карточку
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
-            fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
-            # не критично если forward не сработает — всё равно отправим карточку
+            fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': message.get('message_id')}
             requests.post(fwd_url, data=fwd_payload, timeout=5)
         except Exception:
-            # игнорируем ошибки пересылки, дальше отправим карточку
+            # игнорируем ошибки пересылки
             pass
 
-        # Отправляем красиво оформленную карточку админу
-        send_message(ADMIN_ID, premium_card, reply_markup=reply_markup, parse_mode='HTML')
+        # отправляем расширённую карточку админу
+        send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
         send_message(user_chat_id, "✅ Дякуємо! Ваша заявка надіслана.")
         return
-
     except Exception as e:
         cool_error_handler(e, context="forward_ad_to_admin: unhandled")
         MainProtokol(str(e), "ForwardAdUnhandledException")
