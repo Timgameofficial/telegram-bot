@@ -79,7 +79,8 @@ MAIN_MENU = [
     "📢 Про нас",
     "🕰️ Графік роботи",
     "📝 Повідомити про подію",
-    "📊 Статистика подій"
+    "📊 Статистика подій",
+    "📣 Реклама"
 ]
 
 def get_reply_buttons():
@@ -88,7 +89,8 @@ def get_reply_buttons():
             [{"text": "📢 Про нас"}],
             [{"text": "🕰️ Графік роботи"}],
             [{"text": "📝 Повідомити про подію"}],
-            [{"text": "📊 Статистика подій"}]
+            [{"text": "📊 Статистика подій"}],
+            [{"text": "📣 Реклама"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -111,9 +113,12 @@ def get_admin_subcategory_buttons():
         "one_time_keyboard": True
     }
 
-# ====== Хранилище для статусу вибору категорії користувача ======
+# ====== Хранилище для статусу вибору категoрии користувача ======
 waiting_for_admin_message = set()
 user_admin_category = {}
+
+# Новое хранилище для рекламных сообщений
+waiting_for_ad_message = set()
 
 # ====== Настройки БД ======
 # Если задан DATABASE_URL (например, postgres://...), используем её.
@@ -400,6 +405,118 @@ def forward_user_message_to_admin(message):
         except Exception as err:
             cool_error_handler(err, context="forward_user_message_to_admin: notify user")
 
+def forward_ad_to_admin(message):
+    """
+    Отправляет 'премиальный' рекламный пакет администратору.
+    Включает полную информацию о пользователе и аккуратно отформатированное сообщение HTML.
+    Поведение аналогично forward_user_message_to_admin, но с расширенной информацией.
+    """
+    try:
+        if not ADMIN_ID or ADMIN_ID == 0:
+            send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
+            return
+
+        user = message['from']
+        user_chat_id = message['chat']['id']
+        first = user.get('first_name', '')
+        last = user.get('last_name', '')
+        username = user.get('username')
+        user_id = user.get('id')
+        lang = user.get('language_code', '-')
+        is_bot = user.get('is_bot', False)
+
+        text = message.get('text') or message.get('caption') or ''
+        msg_id = message.get('message_id')
+
+        # Сформируем премиальную карточку в HTML
+        name_display = (first + (' ' + last if last else '')).strip() or "Без імені"
+        # Ссылка на профиль: используем tg://user?id=... — безопасный способ упоминания по id
+        profile_link = f"tg://user?id={user_id}"
+
+        username_line = f"@{escape(username)}" if username else "-"
+        premium_card_lines = [
+            "<b>📣 Преміальна заявка — Реклама</b>",
+            "",
+            f"<b>Відправник:</b> <a href=\"{profile_link}\">{escape(name_display)}</a> ({user_id})",
+            f"<b>Username:</b> {escape(username_line)}",
+            f"<b>Мова:</b> {escape(str(lang))}",
+            f"<b>Is bot:</b> {escape(str(is_bot))}",
+            "",
+            "<b>Опис / Контент рекламного повідомлення:</b>",
+            "<pre>{}</pre>".format(escape(text)) if text else "<i>Немає тексту — тільки медіа або файл</i>",
+            "",
+            "<i>Додаткова інформація:</i>",
+            "- Надіслано через бота. Можна відповісти натиснувши кнопку '✉️ Відповісти'."
+        ]
+        premium_card = "\n".join(premium_card_lines)
+
+        reply_markup = _get_reply_markup_for_admin(user_chat_id)
+
+        # Пытаемся переслать оригинал (если есть) — удобнее для просмотра медиа
+        try:
+            fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
+            fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
+            fwd_resp = requests.post(fwd_url, data=fwd_payload)
+            if fwd_resp.ok:
+                send_message(ADMIN_ID, premium_card, reply_markup=reply_markup, parse_mode='HTML')
+                send_message(user_chat_id, "✅ Дякуємо! Ваш рекламний запит надіслано адміністратору.")
+                return
+            else:
+                MainProtokol(f"forwardMessage (ad) failed: {fwd_resp.text}", "ForwardAdFail")
+        except Exception as e:
+            cool_error_handler(e, context="forward_ad_to_admin: forwardMessage")
+            MainProtokol(str(e), "ForwardAdException")
+
+        # Если переслать не удалось — отправим медиа напрямую (если есть)
+        media_sent = False
+        try:
+            media_types = [
+                ('photo', 'sendPhoto', 'photo'),
+                ('video', 'sendVideo', 'video'),
+                ('document', 'sendDocument', 'document'),
+                ('audio', 'sendAudio', 'audio'),
+                ('voice', 'sendVoice', 'voice'),
+                ('animation', 'sendAnimation', 'animation')
+            ]
+            for key, endpoint, payload_key in media_types:
+                if key in message:
+                    file_id = message[key][-1]['file_id'] if key == 'photo' else message[key]['file_id']
+                    url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
+                    payload = {
+                        'chat_id': ADMIN_ID,
+                        payload_key: file_id,
+                        'caption': premium_card,
+                        'reply_markup': json.dumps(reply_markup),
+                        'parse_mode': 'HTML'
+                    }
+                    resp = requests.post(url, data=payload)
+                    media_sent = resp.ok
+                    if not media_sent:
+                        MainProtokol(f'{endpoint} (ad) failed: {resp.text}', "MediaSendAdFail")
+                    break
+            else:
+                # Без медиа — просто отправим карточку
+                send_message(ADMIN_ID, premium_card, reply_markup=reply_markup, parse_mode='HTML')
+                send_message(user_chat_id, "✅ Дякуємо! Ваш рекламний запит надіслано адміністратору.")
+                return
+        except Exception as e:
+            cool_error_handler(e, context="forward_ad_to_admin: sendMedia")
+            MainProtokol(str(e), "SendMediaAdException")
+
+        if media_sent:
+            send_message(user_chat_id, "✅ Дякуємо! Ваш рекламний запит надіслано адміністратору.")
+        else:
+            # fallback — отправим текстовую карточку
+            send_message(ADMIN_ID, premium_card, reply_markup=reply_markup, parse_mode='HTML')
+            send_message(user_chat_id, "⚠️ Не вдалося переслати медіа. Адміністратору надіслано текстове повідомлення.")
+    except Exception as e:
+        cool_error_handler(e, context="forward_ad_to_admin: unhandled")
+        MainProtokol(str(e), "ForwardAdUnhandledException")
+        try:
+            send_message(message['chat']['id'], "⚠️ Виникла помилка при надсиланні рекламного запиту. Спробуйте ще раз.")
+        except Exception as err:
+            cool_error_handler(err, context="forward_ad_to_admin: notify user")
+
 waiting_for_admin = {}
 
 app = Flask(__name__)
@@ -506,7 +623,7 @@ def webhook():
                 elif text == "📝 Повідомити про подію":
                     desc = (
                         "Оберіть тип події, яку хочете повідомити:\n\n"
-                        "Техногенні: Події, пов'язані з діяльністю людини (аварії, катастрофи на виробництві/транспорті).[...]\n"
+                        "Техногенні: Події, пов'язані з діяльністю людини (аварії, катастрофи на виробництві/транспорті).\n\n"
                         "Природні: Події, спричинені силами природи (землетруси, повені, буревії).\n\n"
                         "Соціальні: Події, пов'язані з суспільними конфліктами або масовими заворушеннями.\n\n"
                         "Воєнні: Події, пов'язані з військовими діями або конфліктами.\n\n"
@@ -521,6 +638,12 @@ def webhook():
                         send_message(chat_id, msg, parse_mode='HTML')
                     else:
                         send_message(chat_id, "Наразі статистика недоступна.")
+                elif text == "📣 Реклама":
+                    waiting_for_ad_message.add(chat_id)
+                    send_message(
+                        chat_id,
+                        "📣 Ви обрали розділ Реклама.\n\nНадішліть текст реклайму і/або прикріпіть зображення/файл. Адміністратор отримає преміально оформлений пакет з повною інформацією про вас."
+                    )
             elif text in ADMIN_SUBCATEGORIES:
                 user_admin_category[chat_id] = text
                 waiting_for_admin_message.add(chat_id)
@@ -529,7 +652,16 @@ def webhook():
                     f"Будь ласка, опишіть деталі події \"{text}\" (можна прикріпити фото чи файл):"
                 )
             else:
-                if chat_id in waiting_for_admin_message:
+                # Проверяем рекламную очередь
+                if chat_id in waiting_for_ad_message:
+                    forward_ad_to_admin(message)
+                    waiting_for_ad_message.remove(chat_id)
+                    send_message(
+                        chat_id,
+                        "Ваша рекламна заявка передана. Адміністратор зв'яжеться з вами найближчим часом.",
+                        reply_markup=get_reply_buttons()
+                    )
+                elif chat_id in waiting_for_admin_message:
                     forward_user_message_to_admin(message)
                     waiting_for_admin_message.remove(chat_id)
                     user_admin_category.pop(chat_id, None)
@@ -541,7 +673,7 @@ def webhook():
                 else:
                     send_message(
                         chat_id,
-                        "Щоб повідомити адміна, спочатку натисніть кнопку «📝 Повідомити про подію» в меню.",
+                        "Щоб повідомити адміна або надіслати рекламу, скористайтесь відповідними кнопками в меню.",
                         reply_markup=get_reply_buttons()
                     )
         return "ok", 200
