@@ -407,9 +407,7 @@ def forward_user_message_to_admin(message):
 
 def forward_ad_to_admin(message):
     """
-    Отправляет 'премиальный' рекламный пакет администратору.
-    Включает полную информацию о пользователе и аккуратно отформатированное сообщение HTML.
-    Поведение аналогично forward_user_message_to_admin, но с расширенной информацией.
+    Отправляет рекламный пакет администратору.
     """
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
@@ -572,7 +570,7 @@ def webhook():
                 send_message(
                     chat_id,
                     "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\n"
-                    "Більше про нас: https://www.instagram.com/p/DOEpwuEiLuC/"
+                    "Більше про нас: https://www.instagram.com/creator.bot_official?igsh=cHg1aDRqNXdrb210"
                 )
             elif data == "schedule":
                 send_message(
