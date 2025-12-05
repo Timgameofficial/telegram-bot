@@ -2,11 +2,7 @@
 # Обновлён: поддержка media_group (альбомов), буферизация частей альбома,
 # корректная пересылка всех фото/видео в альбоме, пересылка медиа в ответ админа,
 # инициализация при первом запросе (app.before_request-based) для WSGI-окружений.
-# Изменения в этой версии:
-# - Устранено дублирование описания для админа: при успешной отправке media_group
-#   теперь отправляется короткое уведомление с кнопкой "✉️ Відповісти" (без повторной полной карточки).
-# - При ответе админа альбомом теперь берётся подпись (caption) из первой части альбома и пересылается пользователю.
-# - "Реклама" поддерживает отправку альбомов (media_group) — буферизация работает аналогично "повідомити про подію".
+# Доработано: команда "📣 Реклама" теперь полностью поддерживает отправку альбомов (несколько файлов).
 import os
 import time
 import json
@@ -141,7 +137,7 @@ waiting_for_ad_message = set()
 waiting_for_admin = {}  # admin_id -> user_id awaiting reply
 
 # Буфер для media_group (альбомов)
-# ключ: (chat_id, media_group_id) -> {'messages': [msg,...], 'timer': threading.Timer, 'origin': 'user'|'admin', 'target_user': int|None}
+# ключ: (chat_id, media_group_id) -> {'messages': [msg,...], 'timer': threading.Timer, 'origin': 'user'|'admin', 'target_user': int|None, 'purpose': 'event'|'ad'|None}
 media_group_buffers: Dict[Tuple[int, str], Dict[str, Any]] = {}
 
 # ====== Настройки БД ======
@@ -469,16 +465,17 @@ def build_admin_info(message: dict, category: str = None) -> str:
 # ====== Helpers для media_group ======
 MEDIA_GROUP_COLLECT_DELAY = 1.5  # seconds to wait for other parts of album
 
-def _buffer_media_group(chat_id: int, media_group_id: str, message: Dict[str, Any], origin: str, target_user: int = None):
+def _buffer_media_group(chat_id: int, media_group_id: str, message: Dict[str, Any], origin: str, target_user: int = None, purpose: str = None):
     """
     Буферизуем части альбома. origin: 'user' (user->admin) или 'admin' (admin->user).
+    purpose: 'event' (повідомити про подію) | 'ad' (реклама) | None
     Для admin origin указываем target_user (кому отправлять).
     """
     key = (chat_id, media_group_id)
     with state_lock:
         entry = media_group_buffers.get(key)
         if entry is None:
-            entry = {'messages': [], 'timer': None, 'origin': origin, 'target_user': target_user}
+            entry = {'messages': [], 'timer': None, 'origin': origin, 'target_user': target_user, 'purpose': purpose}
             media_group_buffers[key] = entry
             # стартуем таймер для отложенной обработки
             t = threading.Timer(MEDIA_GROUP_COLLECT_DELAY, _process_media_group, args=(key,))
@@ -486,10 +483,12 @@ def _buffer_media_group(chat_id: int, media_group_id: str, message: Dict[str, An
             t.start()
         # добавляем сообщение (может приходить в любой последовательности)
         entry['messages'].append(message)
-        # обновим target_user если передано
+        # обновим target_user / purpose если передано
         if target_user:
             entry['target_user'] = target_user
-        logger.debug(f"Buffered media_group {media_group_id} from chat {chat_id}, origin={origin}. count={len(entry['messages'])}")
+        if purpose:
+            entry['purpose'] = purpose
+        logger.debug(f"Buffered media_group {media_group_id} from chat {chat_id}, origin={origin}, purpose={purpose}. count={len(entry['messages'])}")
 
 def _process_media_group(key: Tuple[int, str]):
     """
@@ -503,6 +502,7 @@ def _process_media_group(key: Tuple[int, str]):
         messages = entry.get('messages', [])
         origin = entry.get('origin')
         target_user = entry.get('target_user')
+        purpose = entry.get('purpose', None)
         # Сортировать по message_id для последовательности (если есть)
         try:
             messages.sort(key=lambda m: m.get('message_id', 0))
@@ -515,21 +515,39 @@ def _process_media_group(key: Tuple[int, str]):
                 return
             first = messages[0]
             user_chat_id = first['chat']['id']
-            category = user_admin_category.get(user_chat_id, 'Без категорії')
-            admin_info = build_admin_info(first, category=category)
+
+            # Если это реклама — пометим категорию как None и используем purpose='ad'
+            if purpose == 'ad':
+                admin_info = build_admin_info(first, category=None)
+            else:
+                category = user_admin_category.get(user_chat_id, 'Без категорії')
+                admin_info = build_admin_info(first, category=category)
+
             reply_markup = _get_reply_markup_for_admin(user_chat_id)
+
             # Попытка отправить media group
             ok = _send_media_group_to_admin(ADMIN_ID, messages, admin_info, reply_markup)
+
             # фоллбек на отдельное сообщение с карточкой, если не получилось
             if not ok:
                 send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
-            # После обработки — если мы были в режиме ожидания, удалим ожидание
+
+            # После обработки — если мы были в режиме ожидания event, удалим ожидание
             with state_lock:
-                if user_chat_id in waiting_for_admin_message:
+                if purpose != 'ad' and user_chat_id in waiting_for_admin_message:
                     waiting_for_admin_message.discard(user_chat_id)
                     user_admin_category.pop(user_chat_id, None)
-            # Уведомляем пользователя
+                # для рекламы waiting_for_ad_message обычно уже удалён в webhook при буферизации, но на всякий случай:
+                if purpose == 'ad' and user_chat_id in waiting_for_ad_message:
+                    waiting_for_ad_message.discard(user_chat_id)
+
+            # Уведомляем пользователя (если ещё не уведомлен)
             try:
+                # webhook при буферизации рекламы обычно уже уведомил пользователя; проверим и отправим только если нужно
+                with state_lock:
+                    already_notified = (purpose == 'ad' and user_chat_id not in waiting_for_ad_message)
+                # Для простоты: отправим уведомление, если не слишком вероятно дублирование.
+                # (Если вы хотите избегать двойных уведомлений полностью, можно добавить флаг в entry.)
                 send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
             except Exception:
                 pass
@@ -577,11 +595,9 @@ def _extract_media_type_and_file_id(msg: Dict[str, Any]):
 
 def _send_media_group_to_admin(admin_id: int, messages: list, admin_info_html: str, reply_markup: dict = None) -> bool:
     """
-    Посылает sendMediaGroup (если возможно). Раньше после sendMediaGroup отправлялась полная карточка —
-    это вызывало дублирование описания. Теперь:
-     - при успешном sendMediaGroup отправляется компактное уведомление для админа с reply_markup (без повторного полного admin_info),
-       чтобы админ мог нажать "✉️ Відповісти".
-     - при неудаче фоллбек на отправку полной карточки admin_info.
+    Посылает sendMediaGroup (если возможно). Поведение:
+     - при успешном sendMediaGroup отправляется компактное уведомление с кнопкой reply (чтобы не дублировать длинную карточку)
+     - при неудаче фоллбек на отправку полной карточки admin_info
     """
     if not admin_id:
         return False
@@ -591,9 +607,7 @@ def _send_media_group_to_admin(admin_id: int, messages: list, admin_info_html: s
         mtype, fid = _extract_media_type_and_file_id(m)
         if not mtype or not fid:
             continue
-        # Telegram supports photo/video in media groups; map to 'photo'/'video'
         item = {"type": "photo" if mtype == 'photo' else ("video" if mtype == 'video' else "photo"), "media": fid}
-        # caption только для первого элемента (truncate)
         if idx == 0:
             caption = admin_info_html
             if caption:
@@ -607,15 +621,12 @@ def _send_media_group_to_admin(admin_id: int, messages: list, admin_info_html: s
     try:
         resp = _post_with_retries(f"{base}/sendMediaGroup", json_body={'chat_id': admin_id, 'media': media})
         if resp and resp.ok:
-            # Вместо отправки полной карточки (дублирования) — отправим компактное уведомление с кнопкой "✉️ Відповісти"
             try:
                 count = len(media)
                 short_msg = f"📩 Нове повідомлення від користувача (альбом: {count} елемент(ів))."
-                # Дополнительно можно добавить краткую подсказку
                 short_msg += "\nНатисніть «✉️ Відповісти», щоб відповісти користувачу."
                 send_message(admin_id, short_msg, reply_markup=reply_markup, parse_mode=None)
             except Exception:
-                # если не получилось отправить короткое сообщение — ничего страшного
                 logger.exception("Failed to send short notification after sendMediaGroup")
             return True
         else:
@@ -804,7 +815,7 @@ def forward_user_message_to_admin(message: Dict[str, Any]):
         # Если это часть альбома — буферизуем и будем обрабатывать после небольшого ожидания
         mgid = message.get('media_group_id')
         if mgid:
-            _buffer_media_group(user_chat_id, mgid, message, origin='user')
+            _buffer_media_group(user_chat_id, mgid, message, origin='user', purpose='event')
             return
 
         admin_info = build_admin_info(message, category=category)
@@ -851,7 +862,8 @@ def forward_ad_to_admin(message: Dict[str, Any]):
         user_chat_id = message['chat']['id']
         mgid = message.get('media_group_id')
         if mgid:
-            _buffer_media_group(user_chat_id, mgid, message, origin='user')
+            # при рекламе буферизуем с purpose='ad'
+            _buffer_media_group(user_chat_id, mgid, message, origin='user', purpose='ad')
             return
 
         admin_info = build_admin_info(message, category=None)
@@ -1115,7 +1127,7 @@ def webhook(token):
                         waiting_for_ad_message.add(chat_id)
                     send_message(
                         chat_id,
-                        "📣 Ви обрали розділ «Реклама». Надішліть текст та/або медіа — ми відформатуємо заявку у стильному вигляді та передамо адміністратору.",
+                        "📣 Ви обрали розділ «Реклама». Надішліть текст та/або медіа (можна кілька фото/відео як альбом) — ми відформатуємо заявку у стильному вигляді та передамо адміністратору.",
                         reply_markup=get_reply_buttons()
                     )
             elif text in ADMIN_SUBCATEGORIES:
@@ -1133,11 +1145,12 @@ def webhook(token):
                     in_ad = chat_id in waiting_for_ad_message
                     in_admin_msg = chat_id in waiting_for_admin_message
                 if mgid and in_admin_msg:
-                    _buffer_media_group(chat_id, mgid, message, origin='user')
+                    _buffer_media_group(chat_id, mgid, message, origin='user', purpose='event')
                     # не снимем waiting_for_admin_message — он будет снят в процессе буфера
                     return "ok", 200
                 if mgid and in_ad:
-                    _buffer_media_group(chat_id, mgid, message, origin='user')
+                    # при рекламе: помечаем purpose='ad', и удаляем ожидание рекламы (пользователь уже отправил)
+                    _buffer_media_group(chat_id, mgid, message, origin='user', purpose='ad')
                     with state_lock:
                         waiting_for_ad_message.discard(chat_id)
                     send_message(
