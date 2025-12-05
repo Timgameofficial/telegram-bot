@@ -2,6 +2,11 @@
 # Обновлён: поддержка media_group (альбомов), буферизация частей альбома,
 # корректная пересылка всех фото/видео в альбоме, пересылка медиа в ответ админа,
 # инициализация при первом запросе (app.before_request-based) для WSGI-окружений.
+# Изменения в этой версии:
+# - Устранено дублирование описания для админа: при успешной отправке media_group
+#   теперь отправляется короткое уведомление с кнопкой "✉️ Відповісти" (без повторной полной карточки).
+# - При ответе админа альбомом теперь берётся подпись (caption) из первой части альбома и пересылается пользователю.
+# - "Реклама" поддерживает отправку альбомов (media_group) — буферизация работает аналогично "повідомити про подію".
 import os
 import time
 import json
@@ -534,7 +539,14 @@ def _process_media_group(key: Tuple[int, str]):
             if not target_user:
                 logger.warning("process_media_group admin origin but no target_user")
                 return
-            ok = _send_media_group_to_user(target_user, messages, caption_text=None)
+            # Если админ добавил подпись в первую часть альбома — используем её как caption
+            caption_text = None
+            try:
+                if messages and isinstance(messages[0], dict):
+                    caption_text = messages[0].get('caption') or messages[0].get('text') or None
+            except Exception:
+                caption_text = None
+            ok = _send_media_group_to_user(target_user, messages, caption_text=caption_text)
             # фоллбек: отправим текстовое уведомление, если не получилось
             try:
                 if not ok:
@@ -565,8 +577,11 @@ def _extract_media_type_and_file_id(msg: Dict[str, Any]):
 
 def _send_media_group_to_admin(admin_id: int, messages: list, admin_info_html: str, reply_markup: dict = None) -> bool:
     """
-    Посылает sendMediaGroup (если возможно) + затем отдельно полную карточку (со reply_markup).
-    Поддерживает фото/видео в альбоме.
+    Посылает sendMediaGroup (если возможно). Раньше после sendMediaGroup отправлялась полная карточка —
+    это вызывало дублирование описания. Теперь:
+     - при успешном sendMediaGroup отправляется компактное уведомление для админа с reply_markup (без повторного полного admin_info),
+       чтобы админ мог нажать "✉️ Відповісти".
+     - при неудаче фоллбек на отправку полной карточки admin_info.
     """
     if not admin_id:
         return False
@@ -576,12 +591,12 @@ def _send_media_group_to_admin(admin_id: int, messages: list, admin_info_html: s
         mtype, fid = _extract_media_type_and_file_id(m)
         if not mtype or not fid:
             continue
+        # Telegram supports photo/video in media groups; map to 'photo'/'video'
         item = {"type": "photo" if mtype == 'photo' else ("video" if mtype == 'video' else "photo"), "media": fid}
         # caption только для первого элемента (truncate)
         if idx == 0:
             caption = admin_info_html
             if caption:
-                # ограничим до ~1024
                 if len(caption) > 1000:
                     caption = caption[:997] + "..."
                 item['caption'] = caption
@@ -592,11 +607,16 @@ def _send_media_group_to_admin(admin_id: int, messages: list, admin_info_html: s
     try:
         resp = _post_with_retries(f"{base}/sendMediaGroup", json_body={'chat_id': admin_id, 'media': media})
         if resp and resp.ok:
-            # sendMediaGroup doesn't support reply_markup; отправим полную карточку отдельно (кнопка "ответить")
+            # Вместо отправки полной карточки (дублирования) — отправим компактное уведомление с кнопкой "✉️ Відповісти"
             try:
-                send_message(admin_id, admin_info_html, reply_markup=reply_markup, parse_mode='HTML')
+                count = len(media)
+                short_msg = f"📩 Нове повідомлення від користувача (альбом: {count} елемент(ів))."
+                # Дополнительно можно добавить краткую подсказку
+                short_msg += "\nНатисніть «✉️ Відповісти», щоб відповісти користувачу."
+                send_message(admin_id, short_msg, reply_markup=reply_markup, parse_mode=None)
             except Exception:
-                pass
+                # если не получилось отправить короткое сообщение — ничего страшного
+                logger.exception("Failed to send short notification after sendMediaGroup")
             return True
         else:
             if resp is not None:
@@ -942,7 +962,6 @@ def ensure_initialized():
 @app.before_request
 def _app_ensure_initialized_before_request():
     try:
-        # можно исключать health/metrics пути, но пока запускаем для всех.
         ensure_initialized()
     except Exception as e:
         logger.exception("Error in before_request initialization hook")
