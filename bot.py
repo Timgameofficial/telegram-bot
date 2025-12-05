@@ -1,7 +1,7 @@
 # contents: расширение информации, отправляемой админу — больше полей и аккуратное HTML-оформление
 # Обновлён: поддержка media_group (альбомов), буферизация частей альбома,
 # корректная пересылка всех фото/видео в альбоме, пересылка медиа в ответ админа,
-# инициализация при первом запросе (app.before_first_request) для WSGI-окружений.
+# инициализация при первом запросе (app.before_request-based) для WSGI-окружений.
 import os
 import time
 import json
@@ -278,7 +278,7 @@ def stats_autoclear_daemon():
             cool_error_handler(e, "stats_autoclear_daemon")
         time.sleep(3600)
 
-# ====== Конфигурация (будет считываться в main/before_first_request) ======
+# ====== Конфигурация (будет считываться в main/before_request) ======
 TOKEN = os.getenv("API_TOKEN")
 try:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
@@ -864,7 +864,7 @@ def forward_ad_to_admin(message: Dict[str, Any]):
         except Exception as err:
             cool_error_handler(err, context="forward_ad_to_admin: notify user")
 
-# ====== Flask app и before_first_request инициализация ======
+# ====== Flask app и before_request-based инициализация (надёжнее в разных окружениях) ======
 app = Flask(__name__)
 
 def set_webhook_if_needed():
@@ -878,10 +878,10 @@ def set_webhook_if_needed():
         try:
             r = requests.get(f"https://api.telegram.org/bot{TOKEN}/setWebhook", params={"url": WEBHOOK_URL}, timeout=6)
             if r.ok:
-                logger.info("Webhook успешно установлен (before_first_request).")
+                logger.info("Webhook успешно установлен (init).")
             else:
-                logger.warning("Ошибка при установке webhook (before_first_request): %s", r.text)
-        except Exception as e:
+                logger.warning("Ошибка при установке webhook (init): %s", r.text)
+        except Exception:
             logger.exception("set_webhook_if_needed exception")
     except Exception as e:
         cool_error_handler(e, context="set_webhook_if_needed")
@@ -895,11 +895,11 @@ def start_background_workers_once():
     try:
         init_db()
     except Exception as e:
-        cool_error_handler(e, context="before_first_request: init_db")
+        cool_error_handler(e, context="init_db in background")
     try:
         set_webhook_if_needed()
     except Exception as e:
-        cool_error_handler(e, context="before_first_request: set_webhook")
+        cool_error_handler(e, context="set_webhook in background")
 
     # Запускаем фоновые потоки только если ещё не запущены в этом процессе
     def _start_thread_if_missing(name, target):
@@ -912,15 +912,41 @@ def start_background_workers_once():
         _start_thread_if_missing("stats-autoclear", stats_autoclear_daemon)
         _start_thread_if_missing("self-pinger", lambda: start_self_pinger_thread())
     except Exception as e:
-        cool_error_handler(e, context="before_first_request: start threads")
+        cool_error_handler(e, context="start background threads")
 
-@app.before_first_request
-def _app_before_first_request():
-    # Запускаем инициализацию в отдельном небольшом треде, чтобы не блокировать обработку запроса
+# before_first_request иногда недоступен в особых сборках Flask/WSGI; используем before_request с флагом
+_initialized = False
+_init_lock = threading.Lock()
+
+def _start_init_in_background():
     try:
-        threading.Thread(target=start_background_workers_once, daemon=True, name="init-once").start()
+        start_background_workers_once()
     except Exception as e:
-        cool_error_handler(e, context="before_first_request wrapper")
+        cool_error_handler(e, context="background init runner")
+
+def ensure_initialized():
+    """
+    Запускает инициализацию в фоне ровно один раз в данном процессе.
+    """
+    global _initialized
+    if _initialized:
+        return
+    with _init_lock:
+        if _initialized:
+            return
+        t = threading.Thread(target=_start_init_in_background, daemon=True, name="init-once")
+        t.start()
+        _initialized = True
+        logger.info("Initialization scheduled in background thread for this process.")
+
+@app.before_request
+def _app_ensure_initialized_before_request():
+    try:
+        # можно исключать health/metrics пути, но пока запускаем для всех.
+        ensure_initialized()
+    except Exception as e:
+        logger.exception("Error in before_request initialization hook")
+        cool_error_handler(e, context="before_request init")
 
 @app.errorhandler(Exception)
 def flask_global_error_handler(e):
