@@ -1,6 +1,7 @@
 # contents: расширение информации, отправляемой админу — больше полей и аккуратное HTML-оформление
 # Обновлён: поддержка media_group (альбомов), буферизация частей альбома,
-# корректная пересылка всех фото/видео в альбоме, пересылка медиа в ответ админа.
+# корректная пересылка всех фото/видео в альбоме, пересылка медиа в ответ админа,
+# инициализация при первом запросе (app.before_first_request) для WSGI-окружений.
 import os
 import time
 import json
@@ -277,7 +278,7 @@ def stats_autoclear_daemon():
             cool_error_handler(e, "stats_autoclear_daemon")
         time.sleep(3600)
 
-# ====== Конфигурация (будет считываться в main) ======
+# ====== Конфигурация (будет считываться в main/before_first_request) ======
 TOKEN = os.getenv("API_TOKEN")
 try:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
@@ -863,7 +864,63 @@ def forward_ad_to_admin(message: Dict[str, Any]):
         except Exception as err:
             cool_error_handler(err, context="forward_ad_to_admin: notify user")
 
+# ====== Flask app и before_first_request инициализация ======
 app = Flask(__name__)
+
+def set_webhook_if_needed():
+    try:
+        if not TOKEN:
+            MainProtokol("TOKEN не установлен, webhook не настраивается", "Webhook")
+            return
+        if not WEBHOOK_URL:
+            MainProtokol("WEBHOOK_URL не задан, webhook не настраивается", "Webhook")
+            return
+        try:
+            r = requests.get(f"https://api.telegram.org/bot{TOKEN}/setWebhook", params={"url": WEBHOOK_URL}, timeout=6)
+            if r.ok:
+                logger.info("Webhook успешно установлен (before_first_request).")
+            else:
+                logger.warning("Ошибка при установке webhook (before_first_request): %s", r.text)
+        except Exception as e:
+            logger.exception("set_webhook_if_needed exception")
+    except Exception as e:
+        cool_error_handler(e, context="set_webhook_if_needed")
+
+def start_background_workers_once():
+    """
+    Запустить init_db, фоновые демоны и self-pinger — безопасно для многократных вызовов,
+    т.к. init_db идемпотентен (CREATE TABLE IF NOT EXISTS).
+    Важно: при многопроцессном деплое этот код выполнится в каждом worker.
+    """
+    try:
+        init_db()
+    except Exception as e:
+        cool_error_handler(e, context="before_first_request: init_db")
+    try:
+        set_webhook_if_needed()
+    except Exception as e:
+        cool_error_handler(e, context="before_first_request: set_webhook")
+
+    # Запускаем фоновые потоки только если ещё не запущены в этом процессе
+    def _start_thread_if_missing(name, target):
+        exists = any(t.name == name for t in threading.enumerate())
+        if not exists:
+            threading.Thread(target=target, daemon=True, name=name).start()
+
+    try:
+        _start_thread_if_missing("time-debugger", time_debugger)
+        _start_thread_if_missing("stats-autoclear", stats_autoclear_daemon)
+        _start_thread_if_missing("self-pinger", lambda: start_self_pinger_thread())
+    except Exception as e:
+        cool_error_handler(e, context="before_first_request: start threads")
+
+@app.before_first_request
+def _app_before_first_request():
+    # Запускаем инициализацию в отдельном небольшом треде, чтобы не блокировать обработку запроса
+    try:
+        threading.Thread(target=start_background_workers_once, daemon=True, name="init-once").start()
+    except Exception as e:
+        cool_error_handler(e, context="before_first_request wrapper")
 
 @app.errorhandler(Exception)
 def flask_global_error_handler(e):
@@ -1143,7 +1200,7 @@ def start_self_pinger_thread():
     t.start()
 
 if __name__ == "__main__":
-    # Инициализация БД при старте (только при запуске процесса)
+    # Инициализация БД при старте (только при запуске процесса напрямую)
     try:
         init_db()
     except Exception as e:
@@ -1160,7 +1217,8 @@ if __name__ == "__main__":
                 return
             r = requests.get(
                 f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-                params={"url": WEBHOOK_URL}
+                params={"url": WEBHOOK_URL},
+                timeout=6
             )
             if r.ok:
                 logger.info("Webhook успешно установлен!")
@@ -1195,4 +1253,3 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=port)
     except Exception as e:
         cool_error_handler(e, context="main: app.run")
-        
