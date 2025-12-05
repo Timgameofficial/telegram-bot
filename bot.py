@@ -2,7 +2,7 @@
 # Обновлён: поддержка media_group (альбомов), буферизация частей альбома,
 # корректная пересылка всех фото/видео в альбоме, пересылка медиа в ответ админа,
 # инициализация при первом запросе (app.before_request-based) для WSGI-окружений.
-# Доработано: команда "📣 Реклама" теперь полностью поддерживает отправку альбомов (несколько файлов).
+# Доработано: команда "📣 Реклама" теперь поддерживает отправку до 10 файлов (альбомы или последовательные сообщения).
 import os
 import time
 import json
@@ -17,7 +17,7 @@ from logging.handlers import RotatingFileHandler
 from flask import Flask, request, abort
 from html import escape
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List, Optional
 
 # Библиотека для работы с разными БД (Postgres/SQLite)
 from sqlalchemy import create_engine, text
@@ -132,13 +132,19 @@ def get_admin_subcategory_buttons():
 # ====== Состояния ожидания (в памяти, защищены lock) ======
 state_lock = threading.Lock()
 waiting_for_admin_message = set()
-user_admin_category = {}
+user_admin_category: Dict[int, str] = {}
 waiting_for_ad_message = set()
-waiting_for_admin = {}  # admin_id -> user_id awaiting reply
+waiting_for_admin: Dict[int, int] = {}  # admin_id -> user_id awaiting reply
 
 # Буфер для media_group (альбомов)
 # ключ: (chat_id, media_group_id) -> {'messages': [msg,...], 'timer': threading.Timer, 'origin': 'user'|'admin', 'target_user': int|None, 'purpose': 'event'|'ad'|None}
 media_group_buffers: Dict[Tuple[int, str], Dict[str, Any]] = {}
+
+# Дополнительно: буфер последовательных сообщений для рекламы (если пользователь не отправил media_group)
+# key: chat_id -> {'messages': [msg,...], 'timer': Timer}
+ad_seq_buffers: Dict[int, Dict[str, Any]] = {}
+AD_SEQ_MAX_ITEMS = 10
+AD_SEQ_TIMEOUT = 8.0  # seconds to wait after last message before forwarding
 
 # ====== Настройки БД ======
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -537,17 +543,11 @@ def _process_media_group(key: Tuple[int, str]):
                 if purpose != 'ad' and user_chat_id in waiting_for_admin_message:
                     waiting_for_admin_message.discard(user_chat_id)
                     user_admin_category.pop(user_chat_id, None)
-                # для рекламы waiting_for_ad_message обычно уже удалён в webhook при буферизации, но на всякий случай:
                 if purpose == 'ad' and user_chat_id in waiting_for_ad_message:
                     waiting_for_ad_message.discard(user_chat_id)
 
-            # Уведомляем пользователя (если ещё не уведомлен)
+            # Уведомляем пользователя
             try:
-                # webhook при буферизации рекламы обычно уже уведомил пользователя; проверим и отправим только если нужно
-                with state_lock:
-                    already_notified = (purpose == 'ad' and user_chat_id not in waiting_for_ad_message)
-                # Для простоты: отправим уведомление, если не слишком вероятно дублирование.
-                # (Если вы хотите избегать двойных уведомлений полностью, можно добавить флаг в entry.)
                 send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
             except Exception:
                 pass
@@ -577,13 +577,107 @@ def _process_media_group(key: Tuple[int, str]):
     except Exception as e:
         cool_error_handler(e, context="_process_media_group")
 
+# ====== AD sequence buffer: collect sequential messages (photos/videos/docs) for "Реклама" ======
+def _start_ad_seq_timer(chat_id: int):
+    def _timer_cb():
+        try:
+            _finish_ad_seq_collection(chat_id)
+        except Exception as e:
+            cool_error_handler(e, context="_ad_seq_timer_cb")
+    with state_lock:
+        entry = ad_seq_buffers.get(chat_id)
+        if not entry:
+            return
+        # cancel existing timer if any
+        t: Optional[threading.Timer] = entry.get('timer')
+        if t and t.is_alive():
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        # start new timer
+        t_new = threading.Timer(AD_SEQ_TIMEOUT, _timer_cb)
+        entry['timer'] = t_new
+        t_new.start()
+        logger.debug(f"Ad seq timer (re)started for chat {chat_id}")
+
+def _finish_ad_seq_collection(chat_id: int):
+    """
+    Called when ad collection timeout expires or maximum items reached.
+    Forwards collected messages to admin as media_group if possible.
+    """
+    with state_lock:
+        entry = ad_seq_buffers.pop(chat_id, None)
+    if not entry:
+        return
+    messages: List[Dict[str, Any]] = entry.get('messages', [])
+    if not messages:
+        return
+    # If messages include media_group_id and they came as groups, prefer using media_group buffers.
+    # Otherwise, try to forward collected messages as a media group (up to 10 items).
+    try:
+        # Build list of messages to send (limit to AD_SEQ_MAX_ITEMS)
+        msgs_to_send = messages[:AD_SEQ_MAX_ITEMS]
+        # Create admin_info using first message
+        admin_info = build_admin_info(msgs_to_send[0], category=None)
+        reply_markup = _get_reply_markup_for_admin(msgs_to_send[0]['chat']['id'])
+        ok = _send_media_group_to_admin(ADMIN_ID, msgs_to_send, admin_info, reply_markup)
+        if not ok:
+            # fallback: send items one by one (and then send admin_info)
+            for m in msgs_to_send:
+                send_media_to_admin(ADMIN_ID, m, admin_info, reply_markup=None)
+            # send compact admin notification after items
+            try:
+                send_message(ADMIN_ID, f"📩 Рекламна заявка ({len(msgs_to_send)} елемента(ів))", reply_markup=reply_markup)
+            except Exception:
+                pass
+        # notify user (already likely notified earlier, but send confirmation)
+        try:
+            send_message(chat_id, "✅ Ваша рекламна заявка успішно надіслана адміністратору.")
+        except Exception:
+            pass
+    except Exception as e:
+        cool_error_handler(e, context="_finish_ad_seq_collection")
+        try:
+            send_message(chat_id, "⚠️ Виникла помилка при обробці вашої рекламної заявки.")
+        except Exception:
+            pass
+
+def _add_message_to_ad_seq(chat_id: int, message: Dict[str, Any]):
+    """
+    Add message to sequence buffer for ad collection. Returns True if added, False if ignored (e.g., already full).
+    """
+    with state_lock:
+        entry = ad_seq_buffers.get(chat_id)
+        if entry is None:
+            entry = {'messages': [], 'timer': None}
+            ad_seq_buffers[chat_id] = entry
+        msgs: List[Dict[str, Any]] = entry['messages']
+        if len(msgs) >= AD_SEQ_MAX_ITEMS:
+            return False
+        msgs.append(message)
+    # restart timer
+    _start_ad_seq_timer(chat_id)
+    # if reached max, finish immediately
+    if len(msgs) >= AD_SEQ_MAX_ITEMS:
+        # finish in separate thread to avoid blocking webhook
+        threading.Thread(target=_finish_ad_seq_collection, args=(chat_id,), daemon=True).start()
+    return True
+
+def _cancel_ad_seq_collection(chat_id: int):
+    with state_lock:
+        entry = ad_seq_buffers.pop(chat_id, None)
+    if entry:
+        try:
+            t = entry.get('timer')
+            if t and t.is_alive():
+                t.cancel()
+        except Exception:
+            pass
+
+# ====== Helpers для media_group отправки и single-media (реализация выше) ======
 def _extract_media_type_and_file_id(msg: Dict[str, Any]):
-    """
-    Возвращает tuple (type, file_id), type one of 'photo','video','document','audio','voice','animation','sticker'
-    For photo returns ('photo', file_id_of_largest)
-    """
     if 'photo' in msg and isinstance(msg['photo'], list) and msg['photo']:
-        # last is largest
         last = msg['photo'][-1]
         return 'photo', last.get('file_id')
     for k in ('video', 'document', 'audio', 'voice', 'animation', 'sticker'):
@@ -594,11 +688,6 @@ def _extract_media_type_and_file_id(msg: Dict[str, Any]):
     return None, None
 
 def _send_media_group_to_admin(admin_id: int, messages: list, admin_info_html: str, reply_markup: dict = None) -> bool:
-    """
-    Посылает sendMediaGroup (если возможно). Поведение:
-     - при успешном sendMediaGroup отправляется компактное уведомление с кнопкой reply (чтобы не дублировать длинную карточку)
-     - при неудаче фоллбек на отправку полной карточки admin_info
-    """
     if not admin_id:
         return False
     base = f"https://api.telegram.org/bot{TOKEN}"
@@ -638,9 +727,6 @@ def _send_media_group_to_admin(admin_id: int, messages: list, admin_info_html: s
         return False
 
 def _send_media_group_to_user(user_id: int, messages: list, caption_text: str = None) -> bool:
-    """
-    Отправляет альбом пользователю; caption_text можно поставить в подпись к первому элементу.
-    """
     if not user_id:
         return False
     base = f"https://api.telegram.org/bot{TOKEN}"
@@ -671,7 +757,6 @@ def _send_media_group_to_user(user_id: int, messages: list, caption_text: str = 
         cool_error_handler(e, context="_send_media_group_to_user")
         return False
 
-# ====== Single-media senders (used as fallback and for single attachments) ======
 def _truncate_caption_for_media(caption: str, max_len: int = 1000) -> str:
     if not caption:
         return ""
@@ -680,17 +765,12 @@ def _truncate_caption_for_media(caption: str, max_len: int = 1000) -> str:
     return caption[:max_len-3] + "..."
 
 def send_media_to_admin(admin_id: int, message: Dict[str, Any], admin_info_html: str, reply_markup: dict = None) -> bool:
-    """
-    Попытаться аккуратно отправить медиа+подпись админу. Возвращает True при успехе.
-    Для альбомов используйте buffering + _send_media_group_to_admin.
-    """
     if not admin_id:
         MainProtokol("send_media_to_admin: admin_id пустой", "Media")
         return False
     base = f"https://api.telegram.org/bot{TOKEN}"
     caption = _truncate_caption_for_media(admin_info_html, max_len=1000)
     rm_json = json.dumps(reply_markup) if reply_markup else None
-
     try:
         if 'photo' in message and isinstance(message['photo'], list) and message['photo']:
             file_id = message['photo'][-1].get('file_id')
@@ -716,7 +796,6 @@ def send_media_to_admin(admin_id: int, message: Dict[str, Any], admin_info_html:
                     return True
                 if resp is not None:
                     MainProtokol(f"sendVideo failed: {resp.status_code} {resp.text}", "Media")
-        # voice/audio/animation/sticker
         for key, endpoint, payload_key in [
             ('voice', 'sendVoice', 'voice'),
             ('audio', 'sendAudio', 'audio'),
@@ -743,9 +822,6 @@ def send_media_to_admin(admin_id: int, message: Dict[str, Any], admin_info_html:
         return False
 
 def send_media_to_user(user_id: int, message: Dict[str, Any], caption_text: str = None) -> bool:
-    """
-    Отправляет медиа от админа пользователю. Для альбомов используйте buffering.
-    """
     if not user_id:
         MainProtokol("send_media_to_user: user_id пустой", "Media")
         return False
@@ -799,7 +875,7 @@ def send_media_to_user(user_id: int, message: Dict[str, Any], caption_text: str 
         cool_error_handler(e, context="send_media_to_user: outer")
         return False
 
-# ====== Forward logic (user->admin and ad->admin), поддерживает альбомы через буфер ======
+# ====== Forward logic (user->admin and ad->admin) и webhook обработка ======
 def forward_user_message_to_admin(message: Dict[str, Any]):
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
@@ -812,7 +888,6 @@ def forward_user_message_to_admin(message: Dict[str, Any]):
         user_chat_id = message['chat']['id']
         category = user_admin_category.get(user_chat_id, 'Без категорії')
 
-        # Если это часть альбома — буферизуем и будем обрабатывать после небольшого ожидания
         mgid = message.get('media_group_id')
         if mgid:
             _buffer_media_group(user_chat_id, mgid, message, origin='user', purpose='event')
@@ -851,6 +926,11 @@ def forward_user_message_to_admin(message: Dict[str, Any]):
             cool_error_handler(err, context="forward_user_message_to_admin: notify user")
 
 def forward_ad_to_admin(message: Dict[str, Any]):
+    """
+    Note: for ads we now prefer collecting either a media_group (if present)
+    or a sequence of messages (up to AD_SEQ_MAX_ITEMS) collected into ad_seq_buffers.
+    This function is still used for single-message ads.
+    """
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
             try:
@@ -862,9 +942,18 @@ def forward_ad_to_admin(message: Dict[str, Any]):
         user_chat_id = message['chat']['id']
         mgid = message.get('media_group_id')
         if mgid:
-            # при рекламе буферизуем с purpose='ad'
             _buffer_media_group(user_chat_id, mgid, message, origin='user', purpose='ad')
             return
+
+        # If no media_group, but user is in ad sequential collection, we add to ad_seq_buffers.
+        with state_lock:
+            is_collecting = user_chat_id in ad_seq_buffers
+        if is_collecting:
+            added = _add_message_to_ad_seq(user_chat_id, message)
+            if added:
+                # already confirmed to user earlier that collection has started
+                return
+            # if not added (overflow), just process directly below
 
         admin_info = build_admin_info(message, category=None)
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
@@ -998,11 +1087,10 @@ def format_stats_message(stats: dict) -> str:
     content = "\n".join(lines)
     return "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + content + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
 
-# Маршрут webhook общий, проверяем токен внутри
+# ====== Webhook route ======
 @app.route("/webhook/<token>", methods=["POST"])
 def webhook(token):
     try:
-        # Verify token matches configured TOKEN
         if not TOKEN or token != TOKEN:
             logger.warning("Received webhook with invalid token")
             abort(403)
@@ -1057,13 +1145,10 @@ def webhook(token):
             with state_lock:
                 admin_waiting = waiting_for_admin.get(ADMIN_ID)
             if from_id == ADMIN_ID and admin_waiting:
-                # Если admin прислал часть альбома, буферизуем
                 mgid = message.get('media_group_id')
                 if mgid:
-                    # буферизуем под ключ (admin_chat, mgid), укажем target_user
                     _buffer_media_group(from_id, mgid, message, origin='admin', target_user=admin_waiting)
                     return "ok", 200
-                # иначе отправляем единичное медиа/текст пользователю
                 try:
                     user_id = None
                     with state_lock:
@@ -1123,11 +1208,16 @@ def webhook(token):
                     else:
                         send_message(chat_id, "Наразі статистика недоступна.")
                 elif text == "📣 Реклама":
+                    # Start ad collection session: user can send up to AD_SEQ_MAX_ITEMS messages (photos/videos/docs),
+                    # or send them as a single album (media_group). Timeout triggers automatic forward.
                     with state_lock:
                         waiting_for_ad_message.add(chat_id)
+                        # start ad sequence buffer
+                        if chat_id not in ad_seq_buffers:
+                            ad_seq_buffers[chat_id] = {'messages': [], 'timer': None}
                     send_message(
                         chat_id,
-                        "📣 Ви обрали розділ «Реклама». Надішліть текст та/або медіа (можна кілька фото/відео як альбом) — ми відформатуємо заявку у стильному вигляді та передамо адміністратору.",
+                        "📣 Ви обрали «Реклама». Надішліть до 10 фото/відео або документи. Можна відправити як альбом (виберіть кілька файлів в клієнті) або по черзі. Коли закінчите — почекайте кілька секунд або надішліть /done, і ми перешлемо заяву адміну.",
                         reply_markup=get_reply_buttons()
                     )
             elif text in ADMIN_SUBCATEGORIES:
@@ -1139,28 +1229,48 @@ def webhook(token):
                     f"Будь ласка, опишіть деталі події «{text}» (можна прикріпити фото чи файл):"
                 )
             else:
-                # Если сообщение является частью альбома и мы ожидаем сообщение от этого чата — буферизуем
                 mgid = message.get('media_group_id')
                 with state_lock:
                     in_ad = chat_id in waiting_for_ad_message
                     in_admin_msg = chat_id in waiting_for_admin_message
-                if mgid and in_admin_msg:
-                    _buffer_media_group(chat_id, mgid, message, origin='user', purpose='event')
-                    # не снимем waiting_for_admin_message — он будет снят в процессе буфера
-                    return "ok", 200
-                if mgid and in_ad:
-                    # при рекламе: помечаем purpose='ad', и удаляем ожидание рекламы (пользователь уже отправил)
-                    _buffer_media_group(chat_id, mgid, message, origin='user', purpose='ad')
+
+                # If user is in ad collection mode and sends /done -> finish collection now
+                if text.strip() == '/done' and chat_id in ad_seq_buffers:
+                    # cancel timer and finish immediately
+                    threading.Thread(target=_finish_ad_seq_collection, args=(chat_id,), daemon=True).start()
                     with state_lock:
                         waiting_for_ad_message.discard(chat_id)
-                    send_message(
-                        chat_id,
-                        "Ваша рекламна заявка успішно надіслана. Дякуємо!",
-                        reply_markup=get_reply_buttons()
-                    )
                     return "ok", 200
 
+                # If this message is part of a media_group, buffer it to media_group_buffers (general handler)
+                if mgid and (in_admin_msg or in_ad):
+                    purpose = 'event' if in_admin_msg else 'ad'
+                    _buffer_media_group(chat_id, mgid, message, origin='user', purpose=purpose)
+                    # for ads when starting from button we remove waiting flag when we detect incoming album
+                    if purpose == 'ad':
+                        with state_lock:
+                            waiting_for_ad_message.discard(chat_id)
+                    return "ok", 200
+
+                # If user is in ad collection mode and sends messages without media_group -> collect sequentially
                 if in_ad:
+                    # add message to ad sequence buffer (returns True if added)
+                    added = _add_message_to_ad_seq(chat_id, message)
+                    if added:
+                        # if first message, user already got instruction; optionally ack
+                        try:
+                            # send light ack for first message only
+                            with state_lock:
+                                if len(ad_seq_buffers.get(chat_id, {}).get('messages', [])) == 1:
+                                    send_message(chat_id, "📥 Прийнято. Додайте ще файли (до 10) або надішліть /done, щоб відправити зараз.")
+                        except Exception:
+                            pass
+                        # If added to buffer, don't forward immediately
+                        return "ok", 200
+                    # else fallthrough to normal forwarding if buffer was full
+
+                if in_ad:
+                    # fallback single-message ad forwarding (if not collected)
                     forward_ad_to_admin(message)
                     with state_lock:
                         waiting_for_ad_message.discard(chat_id)
