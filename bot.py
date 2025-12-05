@@ -1,4 +1,7 @@
 # contents: расширение информации, отправляемой админу — больше полей и аккуратное HTML-оформление
+# Обновлён: перенесён init/set_webhook в main, добавлены timeout/ретраи для HTTP,
+# блокировки для глобального состояния, support sendMediaGroup/аккуратная отправка медиа,
+# /health endpoint, улучшенное логирование, возможность админа отвечать медиa.
 import os
 import time
 import json
@@ -7,22 +10,36 @@ import threading
 import traceback
 import datetime
 import textwrap
-from flask import Flask, request
+import random
+import logging
+from logging.handlers import RotatingFileHandler
+from flask import Flask, request, abort
 from html import escape
 from pathlib import Path
+from typing import Dict, Any
 
 # Библиотека для работы с разными БД (Postgres/SQLite)
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-# ====== Логирование ======
+# ====== Настройка логирования (RotatingFileHandler) ======
+logger = logging.getLogger("bot")
+logger.setLevel(logging.INFO)
+log_handler = RotatingFileHandler("bot.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
+log_formatter = logging.Formatter("%(asctime)s\t%(levelname)s\t%(message)s")
+log_handler.setFormatter(log_formatter)
+logger.addHandler(log_handler)
+
 def MainProtokol(s, ts='Запис'):
     dt = time.strftime('%d.%m.%Y %H:%M:') + '00'
+    line = f"{dt};{ts};{s}"
     try:
         with open('log.txt', 'a', encoding='utf-8') as f:
-            f.write(f"{dt};{ts};{s}\n")
+            f.write(line + "\n")
     except Exception as e:
-        print("Ошибка записи в лог:", e)
+        logger.exception("Ошибка записи в log.txt")
+    # также в основной лог
+    logger.info(line)
 
 # ====== Простой и понятный обработчик ошибок ======
 def cool_error_handler(exc, context="", send_to_telegram=False):
@@ -42,15 +59,15 @@ def cool_error_handler(exc, context="", send_to_telegram=False):
         with open('critical_errors.log', 'a', encoding='utf-8') as f:
             f.write(readable_msg)
     except Exception as write_err:
-        print("Не удалось записать в 'critical_errors.log':", write_err)
+        logger.exception("Не удалось записать в 'critical_errors.log'")
     try:
         MainProtokol(f"{exc_type}: {str(exc)}", ts='ERROR')
     except Exception as log_err:
-        print("MainProtokol вернул ошибку:", log_err)
-    print(readable_msg)
+        logger.exception("MainProtokol вернул ошибку")
+    logger.error(readable_msg)
     if send_to_telegram:
         try:
-            admin_id = int(os.getenv("ADMIN_ID", "0"))
+            admin_id = int(os.getenv("ADMIN_ID", "0") or 0)
             token = os.getenv("API_TOKEN")
             if admin_id and token:
                 try:
@@ -58,20 +75,20 @@ def cool_error_handler(exc, context="", send_to_telegram=False):
                         f"https://api.telegram.org/bot{token}/sendMessage",
                         data={
                             "chat_id": admin_id,
-                            "text": f"⚠️ Критичная ошибка!\nТип: {exc_type}\nКонтекст: {context}\n\n{str(exc)}",
+                            "text": f"⚠️ Критична ошибка!\nТип: {exc_type}\nКонтекст: {context}\n\n{str(exc)}",
                             "disable_web_page_preview": True
                         },
                         timeout=5
                     )
                 except Exception as telegram_err:
-                    print("Не удалось отправить уведомление в Telegram:", telegram_err)
+                    logger.exception("Не удалось отправить уведомление в Telegram")
         except Exception as env_err:
-            print("Ошибка при подготовке уведомления в Telegram:", env_err)
+            logger.exception("Ошибка при подготовке уведомления в Telegram")
 
 # ====== Фоновый отладчик времени (каждые 5 минут) ======
 def time_debugger():
     while True:
-        print("[DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
+        logger.debug("[DEBUG] " + time.strftime('%Y-%m-%d %H:%M:%S'))
         time.sleep(300)
 
 # ====== Главное меню (reply-кнопки) — премиальное оформление ======
@@ -85,7 +102,6 @@ MAIN_MENU = [
 ]
 
 def get_reply_buttons():
-    # Двухколоночная аккуратная раскладка — выглядит "дороже"
     return {
         "keyboard": [
             [{"text": "📣 Реклама"}],
@@ -113,10 +129,12 @@ def get_admin_subcategory_buttons():
         "one_time_keyboard": True
     }
 
-# ====== Состояния ожидания ======
+# ====== Состояния ожидания (в памяти, защищены lock) ======
+state_lock = threading.Lock()
 waiting_for_admin_message = set()
 user_admin_category = {}
 waiting_for_ad_message = set()
+waiting_for_admin = {}  # mapping admin_id -> user_id awaiting reply
 
 # ====== Настройки БД ======
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -135,7 +153,7 @@ def get_engine():
                 _engine = create_engine(db_url, connect_args={"check_same_thread": False}, future=True)
             else:
                 _engine = create_engine(db_url, future=True)
-            print(f"[DEBUG] Using DB URL: {db_url}")
+            logger.info(f"[DEBUG] Using DB URL: {db_url}")
         except Exception as e:
             cool_error_handler(e, "get_engine")
             raise
@@ -166,7 +184,7 @@ def init_db():
                 cnt = res.scalar() if res is not None else 0
             except Exception:
                 cnt = 0
-            print(f"[DEBUG] events table row count after init: {cnt}")
+            logger.info(f"[DEBUG] events table row count after init: {cnt}")
     except Exception as e:
         cool_error_handler(e, "init_db")
 
@@ -184,7 +202,7 @@ def save_event(category):
                     cnt = r.scalar() or 0
                 except Exception:
                     cnt = None
-            print(f"[DEBUG] Saved event (sqlite). Total events now: {cnt}")
+            logger.info(f"[DEBUG] Saved event (sqlite). Total events now: {cnt}")
         else:
             insert_sql = "INSERT INTO events (category, dt) VALUES (:cat, :dt)"
             with engine.begin() as conn:
@@ -194,7 +212,7 @@ def save_event(category):
                     cnt = r.scalar() or 0
                 except Exception:
                     cnt = None
-            print(f"[DEBUG] Saved event (sql). Total events now: {cnt}")
+            logger.info(f"[DEBUG] Saved event (sql). Total events now: {cnt}")
     except Exception as e:
         cool_error_handler(e, "save_event")
 
@@ -257,41 +275,56 @@ def stats_autoclear_daemon():
             cool_error_handler(e, "stats_autoclear_daemon")
         time.sleep(3600)
 
-# Инициализация БД при старте
-init_db()
-
-# ====== Конфигурация ======
+# ====== Конфигурация (будет считываться в main) ======
 TOKEN = os.getenv("API_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{TOKEN}"
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
+except Exception:
+    ADMIN_ID = 0
+    MainProtokol("Invalid ADMIN_ID env variable, defaulting to 0", "StartupWarning")
 
-# ====== Установка webhook ======
-def set_webhook():
-    try:
-        r = requests.get(
-            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-            params={"url": WEBHOOK_URL}
-        )
-        if r.ok:
-            print("Webhook успешно установлен!")
-        else:
-            print("Ошибка при установке webhook:", r.text)
-    except Exception as e:
-        cool_error_handler(e, context="set_webhook")
+# WEBHOOK_URL следует задавать через переменную окружения WEBHOOK_URL = https://your-app.onrender.com/webhook/<token>
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
-set_webhook()
+# ====== HTTP helper с ретраями ======
+HTTP_TIMEOUT = 6
+RETRY_DELAY = 0.5
+RETRIES = 2
+
+def _post_with_retries(url: str, data: dict = None, files: dict = None, json_body: dict = None):
+    for attempt in range(RETRIES + 1):
+        try:
+            if json_body is not None:
+                resp = requests.post(url, json=json_body, timeout=HTTP_TIMEOUT)
+            else:
+                resp = requests.post(url, data=data, files=files, timeout=HTTP_TIMEOUT)
+            return resp
+        except Exception as e:
+            logger.exception("HTTP request failed")
+            try:
+                MainProtokol(f"_post_with_retries exception: {str(e)}", "HTTP")
+                cool_error_handler(e, context="_post_with_retries", send_to_telegram=False)
+            except Exception:
+                pass
+            if attempt < RETRIES:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+            else:
+                return None
 
 # ====== UI helpers ======
 def send_chat_action(chat_id, action='typing'):
     if not TOKEN:
         return
     try:
-        requests.post(f'https://api.telegram.org/bot{TOKEN}/sendChatAction', data={'chat_id': chat_id, 'action': action}, timeout=3)
+        _post_with_retries(f'https://api.telegram.org/bot{TOKEN}/sendChatAction', data={'chat_id': chat_id, 'action': action})
     except Exception:
-        pass
+        logger.exception("send_chat_action failed")
 
-# ====== Отправка сообщений (parse_mode поддерживается) ======
+# ====== Отправка сообщений (parse_mode поддерживается), теперь с таймаутом/ретраями ======
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
+    if not TOKEN:
+        logger.warning("send_message called but TOKEN not set")
+        return None
     url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
     payload = {
         'chat_id': chat_id,
@@ -301,14 +334,13 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None):
         payload['reply_markup'] = json.dumps(reply_markup)
     if parse_mode:
         payload['parse_mode'] = parse_mode
-    try:
-        resp = requests.post(url, data=payload)
-        if not resp.ok:
-            MainProtokol(resp.text, 'Помилка надсилання')
-        return resp
-    except Exception as e:
-        cool_error_handler(e, context="send_message")
-        MainProtokol(str(e), 'Помилка мережі')
+    resp = _post_with_retries(url, data=payload)
+    if resp is None:
+        MainProtokol("send_message: request failed", 'Помилка надсилання')
+        return None
+    if not resp.ok:
+        MainProtokol(resp.text, 'Помилка надсилання')
+    return resp
 
 def _get_reply_markup_for_admin(user_id: int):
     return {
@@ -317,12 +349,8 @@ def _get_reply_markup_for_admin(user_id: int):
         ]
     }
 
-# ====== Новый helper: строим расширённую карточку для админа ======
+# ====== Helper: строим расширённую карточку для админа ======
 def build_admin_info(message: dict, category: str = None) -> str:
-    """
-    Возвращает HTML-строку с расширённой информацией о сообщении и отправителе.
-    Использует только поля из update['message'] — не делает дополнительных API-вызовов.
-    """
     try:
         user = message.get('from', {})
         chat = message.get('chat', {})
@@ -332,7 +360,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
         user_id = user.get('id')
         lang = user.get('language_code', '-')
         is_bot = user.get('is_bot', False)
-        is_premium = user.get('is_premium', False) if isinstance(user.get('is_premium', None), bool) else user.get('is_premium', None)
+        is_premium = user.get('is_premium', None)
 
         chat_type = chat.get('type', '-')
         chat_title = chat.get('title') or ''
@@ -343,9 +371,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
         except Exception:
             date_str = str(msg_date or '-')
 
-        # Текст / caption
         text = message.get('text') or message.get('caption') or ''
-        # Entities summary (if any)
         entities = message.get('entities') or message.get('caption_entities') or []
         entities_summary = []
         for ent in entities:
@@ -354,7 +380,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
                 entities_summary.append(etype)
         entities_summary = ", ".join(entities_summary) if entities_summary else "-"
 
-        # Медиа summary: перечислим типы медиа и file_id(ы) для диагноза
         media_keys = []
         media_details = []
         media_candidates = [
@@ -365,38 +390,34 @@ def build_admin_info(message: dict, category: str = None) -> str:
                 media_keys.append(k)
                 try:
                     if k == 'photo':
-                        # photo — список размерностей
                         photos = message.get('photo', [])
-                        file_ids = [p.get('file_id') for p in photos if p.get('file_id')]
+                        file_ids = [escape(p.get('file_id')) for p in photos if p.get('file_id')]
                         media_details.append(f"{k} (file_ids: {','.join(file_ids)})")
                     elif k == 'contact':
                         c = message.get('contact', {})
                         media_details.append(f"contact ({escape(str(c.get('phone_number','-')))}: {escape(str(c.get('first_name','')))} )")
                     elif k == 'location':
                         loc = message.get('location', {})
-                        media_details.append(f"location (lat:{loc.get('latitude')}, lon:{loc.get('longitude')})")
+                        media_details.append(f"location (lat:{escape(str(loc.get('latitude')) )}, lon:{escape(str(loc.get('longitude')) )})")
                     else:
-                        fid = message.get(k, {}).get('file_id') if isinstance(message.get(k), dict) else message.get(k, {}).get('file_id') if message.get(k) else None
                         if isinstance(message.get(k), dict) and 'file_id' in message.get(k):
-                            media_details.append(f"{k} (file_id: {message[k].get('file_id')})")
+                            media_details.append(f"{k} (file_id: {escape(message[k].get('file_id'))})")
                         elif isinstance(message.get(k), list) and message.get(k) and isinstance(message.get(k)[-1], dict) and message.get(k)[-1].get('file_id'):
-                            media_details.append(f"{k} (file_id: {message[k][-1].get('file_id')})")
+                            media_details.append(f"{k} (file_id: {escape(message[k][-1].get('file_id'))})")
                         else:
-                            # fallback
                             media_details.append(f"{k}")
                 except Exception:
                     media_details.append(k)
 
         media_summary = ", ".join(media_keys) if media_keys else "-"
 
-        # reply_to_message summary
         reply_info = "-"
         if 'reply_to_message' in message and isinstance(message['reply_to_message'], dict):
             r = message['reply_to_message']
             rfrom = r.get('from', {})
-            rname = (rfrom.get('first_name','') or '') + ((' ' + rfrom.get('last_name')) if rfrom.get('last_name') else '')
+            rname = (rfrom.get('first_name','') or '') + ((' ' + (rfrom.get('last_name') or '')) if rfrom.get('last_name') else '')
             reply_info = f"id:{r.get('message_id','-')} from:{escape(rname or '-')}"
-        # build HTML
+
         parts = [
             "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>",
             "<b>📩 Нове повідомлення від користувача</b>",
@@ -404,7 +425,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
         ]
         if category:
             parts.append(f"<b>Категорія:</b> {escape(category)}")
-        # user block
         display_name = (first + (" " + last if last else "")).strip() or "Без імені"
         parts += [
             f"<b>Ім'я:</b> {escape(display_name)}",
@@ -418,7 +438,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
         ]
         if is_premium is not None:
             parts.append(f"<b>Is premium:</b> {escape(str(is_premium))}")
-        # chat & message meta
         parts += [
             f"<b>Тип чату:</b> {escape(str(chat_type))}" + (f" ({escape(chat_title)})" if chat_title else ""),
             f"<b>Message ID:</b> {escape(str(msg_id))}",
@@ -432,85 +451,249 @@ def build_admin_info(message: dict, category: str = None) -> str:
             "<i>Повідомлення відформатовано для зручного перегляду.</i>",
             "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
         ]
-        # join with newlines. We will send using parse_mode='HTML'
         return "\n".join(parts)
     except Exception as e:
         cool_error_handler(e, "build_admin_info")
-        # Fallback minimal info:
         try:
             return f"Повідомлення від користувача. ID: {escape(str(message.get('from', {}).get('id', '-')))}"
         except Exception:
             return "Нове повідомлення."
 
-def forward_user_message_to_admin(message):
+# ====== Новая аккуратная пересылка: отправляем медиа+подпись (вместо forwardMessage) ======
+def _truncate_caption_for_media(caption: str, max_len: int = 1000) -> str:
+    if not caption:
+        return ""
+    if len(caption) <= max_len:
+        return caption
+    return caption[:max_len-3] + "..."
+
+def send_media_to_admin(admin_id: int, message: Dict[str, Any], admin_info_html: str, reply_markup: dict = None) -> bool:
+    """
+    Попытаться аккуратно отправить медиа+подпись админу. Возвращает True при успехе.
+    Поддерживает: photo, document, video, audio, voice, animation, sticker.
+    """
+    if not admin_id:
+        MainProtokol("send_media_to_admin: admin_id пустой", "Media")
+        return False
+
+    rm_json = json.dumps(reply_markup) if reply_markup else None
+    caption = _truncate_caption_for_media(admin_info_html, max_len=1000)
+    base = f"https://api.telegram.org/bot{TOKEN}"
+
+    try:
+        if 'photo' in message and isinstance(message['photo'], list) and message['photo']:
+            try:
+                # Обычно message['photo'] — размеры одного фото; берем последний
+                file_id = message['photo'][-1].get('file_id')
+                if file_id:
+                    url = f"{base}/sendPhoto"
+                    payload = {'chat_id': admin_id, 'photo': file_id, 'caption': caption, 'parse_mode': 'HTML'}
+                    if rm_json:
+                        payload['reply_markup'] = rm_json
+                    resp = _post_with_retries(url, data=payload)
+                    if resp and resp.ok:
+                        return True
+                    if resp is not None:
+                        MainProtokol(f"sendPhoto failed: {resp.status_code} {resp.text}", "Media")
+            except Exception as e:
+                cool_error_handler(e, context="send_media_to_admin: photo")
+                return False
+
+        if 'document' in message:
+            try:
+                doc = message['document']
+                file_id = doc.get('file_id') if isinstance(doc, dict) else None
+                if file_id:
+                    url = f"{base}/sendDocument"
+                    payload = {'chat_id': admin_id, 'document': file_id, 'caption': caption, 'parse_mode': 'HTML'}
+                    if rm_json:
+                        payload['reply_markup'] = rm_json
+                    resp = _post_with_retries(url, data=payload)
+                    if resp and resp.ok:
+                        return True
+                    if resp is not None:
+                        MainProtokol(f"sendDocument failed: {resp.status_code} {resp.text}", "Media")
+            except Exception as e:
+                cool_error_handler(e, context="send_media_to_admin: document")
+                return False
+
+        if 'video' in message:
+            try:
+                video = message['video']
+                file_id = video.get('file_id') if isinstance(video, dict) else None
+                if file_id:
+                    url = f"{base}/sendVideo"
+                    payload = {'chat_id': admin_id, 'video': file_id, 'caption': caption, 'parse_mode': 'HTML'}
+                    if rm_json:
+                        payload['reply_markup'] = rm_json
+                    resp = _post_with_retries(url, data=payload)
+                    if resp and resp.ok:
+                        return True
+                    if resp is not None:
+                        MainProtokol(f"sendVideo failed: {resp.status_code} {resp.text}", "Media")
+            except Exception as e:
+                cool_error_handler(e, context="send_media_to_admin: video")
+                return False
+
+        for key, endpoint, payload_key in [
+            ('voice', 'sendVoice', 'voice'),
+            ('audio', 'sendAudio', 'audio'),
+            ('animation', 'sendAnimation', 'animation'),
+            ('sticker', 'sendSticker', 'sticker')
+        ]:
+            if key in message:
+                try:
+                    obj = message[key]
+                    file_id = obj.get('file_id') if isinstance(obj, dict) else None
+                    if file_id:
+                        url = f"{base}/{endpoint}"
+                        payload = {'chat_id': admin_id, payload_key: file_id}
+                        if key not in ('sticker',):
+                            payload['caption'] = caption
+                            payload['parse_mode'] = 'HTML'
+                        if rm_json:
+                            payload['reply_markup'] = rm_json
+                        resp = _post_with_retries(url, data=payload)
+                        if resp and resp.ok:
+                            return True
+                        if resp is not None:
+                            MainProtokol(f"{endpoint} failed: {resp.status_code} {resp.text}", "Media")
+                except Exception as e:
+                    cool_error_handler(e, context=f"send_media_to_admin: {key}")
+                    return False
+
+        return False
+    except Exception as e:
+        cool_error_handler(e, context="send_media_to_admin: outer")
+        return False
+
+# ====== Аналогично: отправка от админа пользователю (поддержка медиа при ответе) ======
+def send_media_to_user(user_id: int, message: Dict[str, Any], caption_text: str = None) -> bool:
+    """
+    Используется, когда админ отвечает пользователю и прикрепляет медиа.
+    caption_text будет подставлен в подпись (ограничено).
+    """
+    if not user_id:
+        MainProtokol("send_media_to_user: user_id пустой", "Media")
+        return False
+    base = f"https://api.telegram.org/bot{TOKEN}"
+    caption = _truncate_caption_for_media(caption_text or "", max_len=1000)
+
+    try:
+        if 'photo' in message and isinstance(message['photo'], list) and message['photo']:
+            try:
+                file_id = message['photo'][-1].get('file_id')
+                if file_id:
+                    url = f"{base}/sendPhoto"
+                    payload = {'chat_id': user_id, 'photo': file_id, 'caption': caption, 'parse_mode': 'HTML'}
+                    resp = _post_with_retries(url, data=payload)
+                    if resp and resp.ok:
+                        return True
+                    if resp is not None:
+                        MainProtokol(f"sendPhoto->user failed: {resp.status_code} {resp.text}", "MediaUser")
+            except Exception as e:
+                cool_error_handler(e, context="send_media_to_user: photo")
+                return False
+
+        if 'document' in message:
+            try:
+                file_id = message['document'].get('file_id')
+                if file_id:
+                    url = f"{base}/sendDocument"
+                    payload = {'chat_id': user_id, 'document': file_id, 'caption': caption, 'parse_mode': 'HTML'}
+                    resp = _post_with_retries(url, data=payload)
+                    if resp and resp.ok:
+                        return True
+                    if resp is not None:
+                        MainProtokol(f"sendDocument->user failed: {resp.status_code} {resp.text}", "MediaUser")
+            except Exception as e:
+                cool_error_handler(e, context="send_media_to_user: document")
+                return False
+
+        if 'video' in message:
+            try:
+                file_id = message['video'].get('file_id')
+                if file_id:
+                    url = f"{base}/sendVideo"
+                    payload = {'chat_id': user_id, 'video': file_id, 'caption': caption, 'parse_mode': 'HTML'}
+                    resp = _post_with_retries(url, data=payload)
+                    if resp and resp.ok:
+                        return True
+                    if resp is not None:
+                        MainProtokol(f"sendVideo->user failed: {resp.status_code} {resp.text}", "MediaUser")
+            except Exception as e:
+                cool_error_handler(e, context="send_media_to_user: video")
+                return False
+
+        for key, endpoint, payload_key in [
+            ('voice', 'sendVoice', 'voice'),
+            ('audio', 'sendAudio', 'audio'),
+            ('animation', 'sendAnimation', 'animation'),
+            ('sticker', 'sendSticker', 'sticker')
+        ]:
+            if key in message:
+                try:
+                    file_id = message[key].get('file_id')
+                    if file_id:
+                        url = f"{base}/{endpoint}"
+                        payload = {'chat_id': user_id, payload_key: file_id}
+                        if key not in ('sticker',):
+                            payload['caption'] = caption
+                            payload['parse_mode'] = 'HTML'
+                        resp = _post_with_retries(url, data=payload)
+                        if resp and resp.ok:
+                            return True
+                        if resp is not None:
+                            MainProtokol(f"{endpoint}->user failed: {resp.status_code} {resp.text}", "MediaUser")
+                except Exception as e:
+                    cool_error_handler(e, context=f"send_media_to_user: {key}")
+                    return False
+
+        return False
+    except Exception as e:
+        cool_error_handler(e, context="send_media_to_user: outer")
+        return False
+
+def forward_user_message_to_admin(message: Dict[str, Any]):
+    """
+    Обновлённая версия: не пересылает оригинал через forwardMessage,
+    а аккуратно отправляет медиа с подписью (admin_info) или просто отправляет карточку.
+    """
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
-            send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
+            try:
+                send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
+            except Exception:
+                pass
             return
 
         user_chat_id = message['chat']['id']
-        msg_id = message.get('message_id')
         category = user_admin_category.get(user_chat_id, 'Без категорії')
 
-        # строим расширённую карточку
         admin_info = build_admin_info(message, category=category)
-
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
-        if category in ADMIN_SUBCATEGORIES:
-            save_event(category)
 
-        # пытаемся переслать оригинал; но даже если не получится, отправим расширённую карточку
         try:
-            fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
-            fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
-            fwd_resp = requests.post(fwd_url, data=fwd_payload, timeout=5)
-            # отправляем карточку отдельно (чтобы всегда было форматирование)
-            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+            if category in ADMIN_SUBCATEGORIES:
+                save_event(category)
+        except Exception as e:
+            MainProtokol(f"save_event failed: {str(e)}", "SaveEvent")
+
+        try:
+            media_ok = send_media_to_admin(ADMIN_ID, message, admin_info, reply_markup=reply_markup)
+            if not media_ok:
+                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
             send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
             return
         except Exception as e:
-            MainProtokol(f"forwardMessage failed (user): {str(e)}", "ForwardFail")
-            # продолжим и отправим карточку
-
-        # попытка отправки медиа (если есть) с подписью admin_info
-        media_sent = False
-        try:
-            media_types = [
-                ('photo', 'sendPhoto', 'photo'),
-                ('video', 'sendVideo', 'video'),
-                ('document', 'sendDocument', 'document'),
-                ('audio', 'sendAudio', 'audio'),
-                ('voice', 'sendVoice', 'voice'),
-                ('animation', 'sendAnimation', 'animation'),
-                ('sticker', 'sendSticker', 'sticker')
-            ]
-            for key, endpoint, payload_key in media_types:
-                if key in message:
-                    if key == 'photo':
-                        file_id = message[key][-1]['file_id']
-                    else:
-                        file_id = message[key]['file_id'] if isinstance(message[key], dict) else message[key].get('file_id')
-                    url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
-                    payload = {
-                        'chat_id': ADMIN_ID,
-                        payload_key: file_id,
-                        'caption': admin_info,
-                        'reply_markup': json.dumps(reply_markup),
-                        'parse_mode': 'HTML'
-                    }
-                    resp = requests.post(url, data=payload)
-                    media_sent = resp.ok
-                    if not media_sent:
-                        MainProtokol(f'{endpoint} failed: {resp.text}', "MediaSendFail")
-                    break
-            if not media_sent:
-                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
-            send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
-        except Exception as e:
             cool_error_handler(e, context="forward_user_message_to_admin: sendMedia")
             MainProtokol(str(e), "SendMediaException")
-            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
-            send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст повідомлення.")
+            try:
+                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+                send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст повідомлення.")
+            except Exception:
+                pass
+            return
     except Exception as e:
         cool_error_handler(e, context="forward_user_message_to_admin: unhandled")
         MainProtokol(str(e), "ForwardUnhandledException")
@@ -519,40 +702,38 @@ def forward_user_message_to_admin(message):
         except Exception as err:
             cool_error_handler(err, context="forward_user_message_to_admin: notify user")
 
-def forward_ad_to_admin(message):
-    """
-    Отправляет рекламную заявку админу с расширенной информацией (HTML).
-    Упрощённая формулировка для пользователя — админ получает подробную карточку.
-    """
+def forward_ad_to_admin(message: Dict[str, Any]):
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
-            send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
+            try:
+                send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
+            except Exception:
+                pass
             return
 
         user_chat_id = message['chat']['id']
-        category = None  # для рекламы категория не используется, но можно передать
-        admin_info = build_admin_info(message, category=category)
-
+        admin_info = build_admin_info(message, category=None)
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
 
-        # Показываем админу "typing" перед отправкой
         if ADMIN_ID and ADMIN_ID != 0:
             send_chat_action(ADMIN_ID, 'typing')
             time.sleep(0.25)
 
-        # Пытаемся переслать оригинал (если есть), но в любом случае отправим карточку
         try:
-            fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
-            fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': message.get('message_id')}
-            requests.post(fwd_url, data=fwd_payload, timeout=5)
-        except Exception:
-            # игнорируем ошибки пересылки
-            pass
-
-        # отправляем расширённую карточку админу
-        send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
-        send_message(user_chat_id, "✅ Дякуємо! Ваша заявка надіслана.")
-        return
+            media_ok = send_media_to_admin(ADMIN_ID, message, admin_info, reply_markup=reply_markup)
+            if not media_ok:
+                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+            send_message(user_chat_id, "✅ Дякуємо! Ваша заявка надіслана.")
+            return
+        except Exception as e:
+            cool_error_handler(e, context="forward_ad_to_admin: sendMedia")
+            MainProtokol(str(e), "ForwardAdMediaException")
+            try:
+                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+                send_message(user_chat_id, "⚠️ Виникла помилка при надсиланні рекламного запиту. Спробуйте ще раз.")
+            except Exception:
+                pass
+            return
     except Exception as e:
         cool_error_handler(e, context="forward_ad_to_admin: unhandled")
         MainProtokol(str(e), "ForwardAdUnhandledException")
@@ -560,8 +741,6 @@ def forward_ad_to_admin(message):
             send_message(message['chat']['id'], "⚠️ Виникла помилка при надсиланні рекламного запиту. Спробуйте ще раз.")
         except Exception as err:
             cool_error_handler(err, context="forward_ad_to_admin: notify user")
-
-waiting_for_admin = {}
 
 app = Flask(__name__)
 
@@ -582,24 +761,30 @@ def format_stats_message(stats: dict) -> str:
         month = stats[cat]['month']
         lines.append(f"{name.ljust(max_cat_len)}  {str(week):>6}  {str(month):>6}")
     content = "\n".join(lines)
-    # рамка премиального вида
     return "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + content + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
 
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
-def webhook():
+# Маршрут webhook общий, проверяем токен внутри
+@app.route("/webhook/<token>", methods=["POST"])
+def webhook(token):
     try:
+        # Verify token matches configured TOKEN
+        if not TOKEN or token != TOKEN:
+            logger.warning("Received webhook with invalid token")
+            abort(403)
+
         data_raw = request.get_data(as_text=True)
         update = json.loads(data_raw)
 
         if 'callback_query' in update:
             call = update['callback_query']
             chat_id = call['from']['id']
-            data = call['data']
+            data = call.get('data', '')
 
             if data.startswith("reply_") and chat_id == ADMIN_ID:
                 try:
-                    user_id = int(data.split("_")[1])
-                    waiting_for_admin[ADMIN_ID] = user_id
+                    user_id = int(data.split("_", 1)[1])
+                    with state_lock:
+                        waiting_for_admin[ADMIN_ID] = user_id
                     send_message(
                         ADMIN_ID,
                         f"✍️ Введіть відповідь для користувача {user_id}:"
@@ -618,7 +803,8 @@ def webhook():
                     "Наш бот приймає повідомлення 24/7. Ми відповідаємо якнайшвидше."
                 )
             elif data == "write_admin":
-                waiting_for_admin_message.add(chat_id)
+                with state_lock:
+                    waiting_for_admin_message.add(chat_id)
                 send_message(
                     chat_id,
                     "✍️ Напишіть повідомлення адміністратору (текст/фото/документ):"
@@ -632,14 +818,30 @@ def webhook():
             text = message.get('text', '')
             first_name = message['from'].get('first_name', 'Без імені')
 
-            # Ответ администратора пользователю
-            if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
-                user_id = waiting_for_admin.pop(ADMIN_ID)
-                send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
-                send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
-                return "ok", 200
+            # Ответ администратора пользователю (текст или медиа)
+            with state_lock:
+                admin_waiting = waiting_for_admin.get(ADMIN_ID)
+            if from_id == ADMIN_ID and admin_waiting:
+                user_id = None
+                with state_lock:
+                    user_id = waiting_for_admin.pop(ADMIN_ID, None)
+                if user_id:
+                    # Если админ отправил медиа - пересылаем медиа аккуратно
+                    try:
+                        media_sent = send_media_to_user(user_id, message, caption_text=text)
+                        if not media_sent:
+                            # фоллбек — отправить текст
+                            send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
+                        send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
+                    except Exception as e:
+                        cool_error_handler(e, context="webhook: admin reply send")
+                        try:
+                            send_message(ADMIN_ID, f"❌ Не вдалося надіслати відповідь користувачу {user_id}")
+                        except Exception:
+                            pass
+                    return "ok", 200
 
-            # Главное меню
+            # Главное меню и другие обработки
             if text == '/start':
                 send_chat_action(chat_id, 'typing')
                 time.sleep(0.25)
@@ -681,32 +883,39 @@ def webhook():
                     else:
                         send_message(chat_id, "Наразі статистика недоступна.")
                 elif text == "📣 Реклама":
-                    waiting_for_ad_message.add(chat_id)
+                    with state_lock:
+                        waiting_for_ad_message.add(chat_id)
                     send_message(
                         chat_id,
                         "📣 Ви обрали розділ «Реклама». Надішліть текст та/або медіа — ми відформатуємо заявку у стильному вигляді та передамо адміністратору.",
                         reply_markup=get_reply_buttons()
                     )
             elif text in ADMIN_SUBCATEGORIES:
-                user_admin_category[chat_id] = text
-                waiting_for_admin_message.add(chat_id)
+                with state_lock:
+                    user_admin_category[chat_id] = text
+                    waiting_for_admin_message.add(chat_id)
                 send_message(
                     chat_id,
                     f"Будь ласка, опишіть деталі події «{text}» (можна прикріпити фото чи файл):"
                 )
             else:
-                if chat_id in waiting_for_ad_message:
+                with state_lock:
+                    in_ad = chat_id in waiting_for_ad_message
+                    in_admin_msg = chat_id in waiting_for_admin_message
+                if in_ad:
                     forward_ad_to_admin(message)
-                    waiting_for_ad_message.remove(chat_id)
+                    with state_lock:
+                        waiting_for_ad_message.discard(chat_id)
                     send_message(
                         chat_id,
                         "Ваша рекламна заявка успішно надіслана. Дякуємо!",
                         reply_markup=get_reply_buttons()
                     )
-                elif chat_id in waiting_for_admin_message:
+                elif in_admin_msg:
                     forward_user_message_to_admin(message)
-                    waiting_for_admin_message.remove(chat_id)
-                    user_admin_category.pop(chat_id, None)
+                    with state_lock:
+                        waiting_for_admin_message.discard(chat_id)
+                        user_admin_category.pop(chat_id, None)
                     send_message(
                         chat_id,
                         "Ваша інформація передана. Дякуємо за активну позицію!",
@@ -723,6 +932,7 @@ def webhook():
     except Exception as e:
         cool_error_handler(e, context="webhook - outer")
         MainProtokol(str(e), 'Помилка webhook')
+        # Возвращаем 200 чтобы Telegram не повторял бесконечно, но логируем ошибку
         return "ok", 200
 
 @app.route('/', methods=['GET'])
@@ -734,7 +944,97 @@ def index():
         cool_error_handler(e, context="index route")
         return "Error", 500
 
+@app.route('/health', methods=['GET'])
+def health():
+    # Лёгкий health-check: быстрый 200 без тяжёлых операций
+    return "ok", 200
+
+# ====== Self-pinger: опциональный внутренний пинг публичного /health или / ======
+def self_pinger_loop(url: str, min_sec: int = 180, max_sec: int = 600, timeout: int = 5):
+    if not url:
+        MainProtokol("SELF_PING_URL пустой — пингер не запущен", "Pinger")
+        return
+
+    MainProtokol(f"Self-pinger запущен. URL: {url}", "Pinger")
+    consecutive_failures = 0
+
+    while True:
+        try:
+            wait = random.uniform(min_sec, max_sec)
+            time.sleep(wait)
+
+            headers = {"X-Self-Ping": "1", "User-Agent": "self-pinger/1.0"}
+            try:
+                resp = requests.get(url, headers=headers, timeout=timeout)
+                if resp.ok:
+                    consecutive_failures = 0
+                    MainProtokol(f"Self-ping OK ({resp.status_code})", "Pinger")
+                else:
+                    consecutive_failures += 1
+                    MainProtokol(f"Self-ping HTTP {resp.status_code}: {resp.text[:200]}", "Pinger")
+            except Exception as e:
+                consecutive_failures += 1
+                MainProtokol(f"Self-ping exception: {str(e)}", "PingerError")
+                try:
+                    cool_error_handler(e, context="self_pinger_loop")
+                except Exception:
+                    pass
+
+            if consecutive_failures >= 6:
+                backoff = min(3600, max_sec * 2)
+                MainProtokol(f"Много ошибок пинга, делаем backoff {backoff}s", "PingerBackoff")
+                time.sleep(backoff)
+        except Exception as outer:
+            try:
+                cool_error_handler(outer, context="self_pinger_loop: outer")
+            except Exception:
+                logger.exception("Ошибка в self_pinger_loop outer")
+            time.sleep(30)
+
+def start_self_pinger_thread():
+    url = os.getenv("SELF_PING_URL", "").strip()
+    if not url:
+        MainProtokol("SELF_PING_URL не задан — self-pinger не будет запущен", "Pinger")
+        return
+    if "/webhook/" in url:
+        MainProtokol("SELF_PING_URL содержит '/webhook/' — измените на корень или /health", "PingerWarning")
+        return
+    t = threading.Thread(target=self_pinger_loop, args=(url,), daemon=True, name="self-pinger")
+    t.start()
+
 if __name__ == "__main__":
+    # Инициализация БД при старте (только при запуске процесса)
+    try:
+        init_db()
+    except Exception as e:
+        cool_error_handler(e, context="main: init_db")
+
+    # Установка webhook (опционально) — WEBHOOK_URL должен быть задан в env
+    def set_webhook():
+        try:
+            if not TOKEN:
+                MainProtokol("TOKEN не установлен, webhook не настраивается", "Webhook")
+                return
+            if not WEBHOOK_URL:
+                MainProtokol("WEBHOOK_URL не задан, webhook не настраивается", "Webhook")
+                return
+            r = requests.get(
+                f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+                params={"url": WEBHOOK_URL}
+            )
+            if r.ok:
+                logger.info("Webhook успешно установлен!")
+            else:
+                logger.warning("Ошибка при установке webhook: %s", r.text)
+        except Exception as e:
+            cool_error_handler(e, context="set_webhook")
+
+    try:
+        set_webhook()
+    except Exception as e:
+        cool_error_handler(e, context="main: set_webhook")
+
+    # Запуск фоновых демонов
     try:
         threading.Thread(target=time_debugger, daemon=True).start()
     except Exception as e:
@@ -743,6 +1043,13 @@ if __name__ == "__main__":
         threading.Thread(target=stats_autoclear_daemon, daemon=True).start()
     except Exception as e:
         cool_error_handler(e, context="main: start stats_autoclear_daemon")
+
+    # Запуск self-pinger (если указан SELF_PING_URL)
+    try:
+        start_self_pinger_thread()
+    except Exception as e:
+        cool_error_handler(e, context="main: start self-pinger")
+
     port = int(os.getenv("PORT", 5000))
     try:
         app.run(host="0.0.0.0", port=port)
