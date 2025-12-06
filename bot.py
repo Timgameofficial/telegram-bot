@@ -14,6 +14,7 @@ from pathlib import Path
 # Библиотека для работы с разными БД (Postgres/SQLite)
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import ArgumentError
 
 # ====== Логирование ======
 def MainProtokol(s, ts='Запис'):
@@ -131,14 +132,62 @@ def get_engine():
     global _engine
     if _engine is None:
         try:
+            # Простая валидация: обязательна схема в URL (например postgresql://user:pass@host/db)
+            if not db_url:
+                raise ValueError("DATABASE_URL is empty")
+
+            # Если явно sqlite — используем options для sqlite
             if db_url.startswith("sqlite:///"):
                 _engine = create_engine(db_url, connect_args={"check_same_thread": False}, future=True)
+                print(f"[DEBUG] Using SQLite DB URL: {db_url}")
             else:
+                # Минимальная предвалидация строкой: наличие '://'
+                if '://' not in db_url:
+                    raise ArgumentError(f"Invalid DB URL (missing scheme): {db_url}")
+
+                # Попытка создать движок для внешней СУБД (Postgres и т.д.)
                 _engine = create_engine(db_url, future=True)
-            print(f"[DEBUG] Using DB URL: {db_url}")
+                print(f"[DEBUG] Using DB URL: {db_url}")
+        except ArgumentError as e:
+            # Неправильный формат URL
+            cool_error_handler(e, "get_engine (ArgumentError)")
+            MainProtokol(f"Invalid DATABASE_URL: {db_url}", ts='WARN')
+            # Попытка безопасно переключиться на локальный sqlite
+            try:
+                fallback_sqlite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
+                fallback_url = f"sqlite:///{fallback_sqlite}"
+                _engine = create_engine(fallback_url, connect_args={"check_same_thread": False}, future=True)
+                print(f"[WARN] Fallback to SQLite at {fallback_sqlite} due to invalid DATABASE_URL.")
+                MainProtokol("Fallback to SQLite due to invalid DATABASE_URL", ts='WARN')
+            except Exception as e2:
+                cool_error_handler(e2, "get_engine (fallback sqlite)")
+                raise
+        except ImportError as e:
+            # Проблемы с импортом драйвера (например несовместимый psycopg2)
+            cool_error_handler(e, "get_engine (ImportError)")
+            MainProtokol("DB driver import failed, falling back to local SQLite", ts='WARN')
+            try:
+                fallback_sqlite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
+                fallback_url = f"sqlite:///{fallback_sqlite}"
+                _engine = create_engine(fallback_url, connect_args={"check_same_thread": False}, future=True)
+                print(f"[WARN] Fallback to SQLite at {fallback_sqlite} due to ImportError for DB driver.")
+            except Exception as e2:
+                cool_error_handler(e2, "get_engine (fallback sqlite after ImportError)")
+                raise
         except Exception as e:
+            # Прочие ошибки (сеть, права, др.)
             cool_error_handler(e, "get_engine")
-            raise
+            MainProtokol(f"get_engine general exception: {str(e)}", ts='ERROR')
+            # Попытка сделать fallback, чтобы бот продолжил работу
+            try:
+                fallback_sqlite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
+                fallback_url = f"sqlite:///{fallback_sqlite}"
+                _engine = create_engine(fallback_url, connect_args={"check_same_thread": False}, future=True)
+                print(f"[WARN] Fallback to SQLite at {fallback_sqlite} due to engine creation error.")
+                MainProtokol("Fallback to SQLite due to engine creation error", ts='WARN')
+            except Exception as e2:
+                cool_error_handler(e2, "get_engine (fallback sqlite after general exception)")
+                raise
     return _engine
 
 def init_db():
@@ -232,8 +281,10 @@ def get_stats():
                     res[cat]['month'] = cnt
         return res
     except Exception as e:
+        # Логируем ошибку, но возвращаем 0-статистику, чтобы UI не показывал "недоступно"
         cool_error_handler(e, "get_stats")
-        return None
+        MainProtokol(str(e), 'get_stats_exception')
+        return {cat: {'week': 0, 'month': 0} for cat in ADMIN_SUBCATEGORIES}
 
 def clear_stats_if_month_passed():
     try:
@@ -510,7 +561,7 @@ def forward_user_message_to_admin(message):
             cool_error_handler(e, context="forward_user_message_to_admin: sendMedia")
             MainProtokol(str(e), "SendMediaException")
             send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
-            send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст повідомлення.")
+            send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст повідомленн[...]
     except Exception as e:
         cool_error_handler(e, context="forward_user_message_to_admin: unhandled")
         MainProtokol(str(e), "ForwardUnhandledException")
@@ -655,7 +706,7 @@ def webhook():
                 elif text == "📢 Про нас":
                     send_message(
                         chat_id,
-                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: https://www.instagram.com/creator.bot_official?igsh=cHg1aDRqNXdrb210"
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: https://www.instagr[...]
                     )
                 elif text == "🕰️ Графік роботи":
                     send_message(
@@ -665,7 +716,7 @@ def webhook():
                 elif text == "📝 Повідомити про подію":
                     desc = (
                         "Оберіть тип події, яку хочете повідомити:\n\n"
-                        "Техногенні: Події, пов'язані з діяльністю людини (аварії, катастрофи на виробництві/транспорті).\n\n"
+                        "Техногенні: Події, пов'язані з діяльністю людини (аварії, катастрофи на виробництві/транспорті).[...]
                         "Природні: Події, спричинені силами природи (землетруси, повені, буревії).\n\n"
                         "Соціальні: Події, пов'язані з суспільними конфліктами або масовими заворушеннями.\n\n"
                         "Воєнні: Події, пов'язані з військовими діями або конфліктами.\n\n"
@@ -684,7 +735,7 @@ def webhook():
                     waiting_for_ad_message.add(chat_id)
                     send_message(
                         chat_id,
-                        "📣 Ви обрали розділ «Реклама». Надішліть текст та/або медіа — ми відформатуємо заявку у стильному вигляді та передамо адміністратору.",
+                        "📣 Ви обрали розділ «Реклама». Надішліть текст та/або медіа — ми відформатуємо заявку у стильно[...]
                         reply_markup=get_reply_buttons()
                     )
             elif text in ADMIN_SUBCATEGORIES:
@@ -748,4 +799,3 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=port)
     except Exception as e:
         cool_error_handler(e, context="main: app.run")
-
