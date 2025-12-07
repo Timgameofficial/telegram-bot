@@ -75,6 +75,172 @@ def time_debugger():
         print("[DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
         time.sleep(300)
 
+
+# ====== Новый хелпер: отправка медиа-группы (альбом фото/видео) ======
+def send_media_group(chat_id, media_items, reply_markup=None):
+    url = f'https://api.telegram.org/bot{TOKEN}/sendMediaGroup'
+    payload = {
+        'chat_id': chat_id,
+        'media': json.dumps(media_items)
+    }
+    if reply_markup:
+        payload['reply_markup'] = json.dumps(reply_markup)
+    resp = requests.post(url, data=payload)
+    return resp
+
+# ====== Универсальная функция для пересылки файлов (альбом или поштучно) ======
+def forward_multiple_media_to_admin(message, admin_info, reply_markup, to_admin=True):
+    results = []
+    target_id = ADMIN_ID if to_admin else message['chat']['id']
+
+    # Медиа-группы: фото/видео
+    if 'media_group_id' in message:
+        # В реальной логике нужно собрать все сообщения с этим media_group_id
+        # Тут упрощённо: если в одном message сразу несколько фото/видео
+        photos = message.get('photo', [])
+        videos = [message['video']] if 'video' in message else []
+        media_items = []
+
+        # Фото
+        for idx, p in enumerate(photos):
+            media_items.append({
+                "type": "photo",
+                "media": p["file_id"],
+                "caption": admin_info if idx == 0 else "",  # подпись только для первой
+                "parse_mode": "HTML"
+            })
+        # Видео
+        for vid in videos:
+            media_items.append({
+                "type": "video",
+                "media": vid["file_id"],
+                "caption": admin_info if not media_items else "",
+                "parse_mode": "HTML"
+            })
+
+        if media_items:
+            send_media_group(target_id, media_items, reply_markup)
+            results.append("group_sent")
+    else:
+        # Одиночные медиа-файлы
+        media_types = [
+            ('photo', 'sendPhoto', 'photo'),
+            ('video', 'sendVideo', 'video'),
+            ('audio', 'sendAudio', 'audio'),
+            ('voice', 'sendVoice', 'voice'),
+            ('animation', 'sendAnimation', 'animation'),
+            ('sticker', 'sendSticker', 'sticker')
+        ]
+        for key, endpoint, payload_key in media_types:
+            if key in message:
+                # Массив фото, обработаем отдельно
+                if key == 'photo' and isinstance(message[key], list) and len(message[key]) > 1:
+                    # Альбом уже выше.
+                    continue
+                file_id = message[key][-1]['file_id'] if key == 'photo' else (
+                    message[key]['file_id'] if isinstance(message[key], dict) else message[key][0]['file_id']
+                )
+                url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
+                payload = {
+                    'chat_id': target_id,
+                    payload_key: file_id,
+                    'caption': admin_info,
+                    'parse_mode': 'HTML',
+                    'reply_markup': json.dumps(reply_markup)
+                }
+                resp = requests.post(url, data=payload)
+                results.append(f"{endpoint}_sent")
+
+    # ===== documents: несколько документов (если пользователь прислал несколько) =====
+    # Обычно документы приходят по одному, но на всякий случай обработаем 'documents' и 'document'
+    docs = []
+    if 'documents' in message and isinstance(message['documents'], list):
+        docs = message['documents']
+    elif 'document' in message and isinstance(message['document'], dict):
+        docs = [message['document']]
+
+    for doc in docs:
+        url = f'https://api.telegram.org/bot{TOKEN}/sendDocument'
+        payload = {
+            'chat_id': target_id,
+            'document': doc['file_id'],
+            'caption': admin_info,
+            'parse_mode': 'HTML',
+            'reply_markup': json.dumps(reply_markup)
+        }
+        resp = requests.post(url, data=payload)
+        results.append("doc_sent")
+
+    # Если ничего не переслали — просто отправить карточку:
+    if not results:
+        send_message(target_id, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+
+    return True
+
+# ====== Обновлённая функция — Повідомити про подію ======
+def forward_user_message_to_admin(message):
+    try:
+        if not ADMIN_ID or ADMIN_ID == 0:
+            send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
+            return
+
+        user_chat_id = message['chat']['id']
+        msg_id = message.get('message_id')
+        category = user_admin_category.get(user_chat_id, 'Без категорії')
+        admin_info = build_admin_info(message, category=category)
+        reply_markup = _get_reply_markup_for_admin(user_chat_id)
+        if category in ADMIN_SUBCATEGORIES:
+            save_event(category)
+
+        try:
+            # Попробуем универсальную функцию пересылки медиа
+            forward_multiple_media_to_admin(message, admin_info, reply_markup)
+            send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
+            return
+        except Exception as e:
+            MainProtokol(f"Media forward error (user): {str(e)}", "ForwardFail")
+            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+            send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст.")
+    except Exception as e:
+        cool_error_handler(e, context="forward_user_message_to_admin: unhandled")
+        MainProtokol(str(e), "ForwardUnhandledException")
+        try:
+            send_message(message['chat']['id'], "⚠️ Виникла помилка при надсиланні. Спробуйте ще раз.")
+        except Exception as err:
+            cool_error_handler(err, context="forward_user_message_to_admin: notify user")
+
+# ====== Обновлённая функция — Реклама ======
+def forward_ad_to_admin(message):
+    try:
+        if not ADMIN_ID or ADMIN_ID == 0:
+            send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
+            return
+
+        user_chat_id = message['chat']['id']
+        admin_info = build_admin_info(message, category=None)
+        reply_markup = _get_reply_markup_for_admin(user_chat_id)
+
+        send_chat_action(ADMIN_ID, 'typing')
+        time.sleep(0.25)
+
+        try:
+            forward_multiple_media_to_admin(message, admin_info, reply_markup)
+            send_message(user_chat_id, "✅ Дякуємо! Ваша заявка надіслана.")
+            return
+        except Exception as e:
+            MainProtokol(f"Media forward error (ad): {str(e)}", "ForwardAdFail")
+            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+            send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст.")
+    except Exception as e:
+        cool_error_handler(e, context="forward_ad_to_admin: unhandled")
+        MainProtokol(str(e), "ForwardAdUnhandledException")
+        try:
+            send_message(message['chat']['id'], "⚠️ Виникла помилка при надсиланні рекламного запиту. Спробуйте ще раз.")
+        except Exception as err:
+            cool_error_handler(err, context="forward_ad_to_admin: notify user")
+
+
+
 # ====== Главное меню (reply-кнопки) — премиальное оформление ======
 MAIN_MENU = [
     "✨ Головне",
