@@ -11,12 +11,10 @@ from flask import Flask, request
 from html import escape
 from pathlib import Path
 
-# Библиотека для работы с разными БД (Postgres/SQLite)
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import ArgumentError
 
-# ====== Логирование ======
 def MainProtokol(s, ts='Запис'):
     dt = time.strftime('%d.%m.%Y %H:%M:') + '00'
     try:
@@ -25,7 +23,6 @@ def MainProtokol(s, ts='Запис'):
     except Exception as e:
         print("Ошибка записи в лог:", e)
 
-# ====== Простой и понятный обработчик ошибок ======
 def cool_error_handler(exc, context="", send_to_telegram=False):
     exc_type = type(exc).__name__
     tb_str = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
@@ -69,13 +66,11 @@ def cool_error_handler(exc, context="", send_to_telegram=False):
         except Exception as env_err:
             print("Ошибка при подготовке уведомления в Telegram:", env_err)
 
-# ====== Фоновый отладчик времени (каждые 5 минут) ======
 def time_debugger():
     while True:
         print("[DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
         time.sleep(300)
 
-# ====== Главное меню (reply-кнопки) — премиальное оформление ======
 MAIN_MENU = [
     "✨ Головне",
     "📢 Про нас",
@@ -86,7 +81,6 @@ MAIN_MENU = [
 ]
 
 def get_reply_buttons():
-    # Двухколоночная аккуратная раскладка — выглядит "дороже"
     return {
         "keyboard": [
             [{"text": "📣 Реклама"}],
@@ -97,7 +91,6 @@ def get_reply_buttons():
         "one_time_keyboard": False
     }
 
-# ====== Категории событий ======
 ADMIN_SUBCATEGORIES = [
     "🏗️ Техногенні",
     "🌪️ Природні",
@@ -114,12 +107,10 @@ def get_admin_subcategory_buttons():
         "one_time_keyboard": True
     }
 
-# ====== Состояния ожидания ======
 waiting_for_admin_message = set()
 user_admin_category = {}
 waiting_for_ad_message = set()
 
-# ====== Настройки БД ======
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if DATABASE_URL:
     db_url = DATABASE_URL
@@ -132,27 +123,19 @@ def get_engine():
     global _engine
     if _engine is None:
         try:
-            # Простая валидация: обязательна схема в URL (например postgresql://user:pass@host/db)
             if not db_url:
                 raise ValueError("DATABASE_URL is empty")
-
-            # Если явно sqlite — используем options для sqlite
             if db_url.startswith("sqlite:///"):
                 _engine = create_engine(db_url, connect_args={"check_same_thread": False}, future=True)
                 print(f"[DEBUG] Using SQLite DB URL: {db_url}")
             else:
-                # Минимальная предвалидация строкой: наличие '://'
                 if '://' not in db_url:
                     raise ArgumentError(f"Invalid DB URL (missing scheme): {db_url}")
-
-                # Попытка создать движок для внешней СУБД (Postgres и т.д.)
                 _engine = create_engine(db_url, future=True)
                 print(f"[DEBUG] Using DB URL: {db_url}")
         except ArgumentError as e:
-            # Неправильный формат URL
             cool_error_handler(e, "get_engine (ArgumentError)")
             MainProtokol(f"Invalid DATABASE_URL: {db_url}", ts='WARN')
-            # Попытка безопасно переключиться на локальный sqlite
             try:
                 fallback_sqlite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
                 fallback_url = f"sqlite:///{fallback_sqlite}"
@@ -163,7 +146,6 @@ def get_engine():
                 cool_error_handler(e2, "get_engine (fallback sqlite)")
                 raise
         except ImportError as e:
-            # Проблемы с импортом драйвера (например несовместимый psycopg2)
             cool_error_handler(e, "get_engine (ImportError)")
             MainProtokol("DB driver import failed, falling back to local SQLite", ts='WARN')
             try:
@@ -175,10 +157,8 @@ def get_engine():
                 cool_error_handler(e2, "get_engine (fallback sqlite after ImportError)")
                 raise
         except Exception as e:
-            # Прочие ошибки (сеть, права, др.)
             cool_error_handler(e, "get_engine")
             MainProtokol(f"get_engine general exception: {str(e)}", ts='ERROR')
-            # Попытка сделать fallback, чтобы бот продолжил работу
             try:
                 fallback_sqlite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
                 fallback_url = f"sqlite:///{fallback_sqlite}"
@@ -281,7 +261,6 @@ def get_stats():
                     res[cat]['month'] = cnt
         return res
     except Exception as e:
-        # Логируем ошибку, но возвращаем 0-статистику, чтобы UI не показывал "недоступно"
         cool_error_handler(e, "get_stats")
         MainProtokol(str(e), 'get_stats_exception')
         return {cat: {'week': 0, 'month': 0} for cat in ADMIN_SUBCATEGORIES}
@@ -308,15 +287,12 @@ def stats_autoclear_daemon():
             cool_error_handler(e, "stats_autoclear_daemon")
         time.sleep(3600)
 
-# Инициализация БД при старте
 init_db()
 
-# ====== Конфигурация ======
 TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{TOKEN}"
 
-# ====== Установка webhook ======
 def set_webhook():
     try:
         r = requests.get(
@@ -332,7 +308,6 @@ def set_webhook():
 
 set_webhook()
 
-# ====== UI helpers ======
 def send_chat_action(chat_id, action='typing'):
     if not TOKEN:
         return
@@ -341,7 +316,6 @@ def send_chat_action(chat_id, action='typing'):
     except Exception:
         pass
 
-# ====== Отправка сообщений (parse_mode поддерживается) ======
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
     payload = {
@@ -361,6 +335,77 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None):
         cool_error_handler(e, context="send_message")
         MainProtokol(str(e), 'Помилка мережі')
 
+def send_media_group(chat_id, media_group, reply_markup=None):
+    url = f'https://api.telegram.org/bot{TOKEN}/sendMediaGroup'
+    payload = {
+        'chat_id': chat_id,
+        'media': json.dumps(media_group)
+    }
+    if reply_markup:
+        payload['reply_markup'] = json.dumps(reply_markup)
+    try:
+        resp = requests.post(url, data=payload)
+        if not resp.ok:
+            MainProtokol(resp.text, 'Помилка надсилання media group')
+        return resp
+    except Exception as e:
+        cool_error_handler(e, context="send_media_group")
+        MainProtokol(str(e), 'Помилка мережі media group')
+
+def send_admin_media_reply(user_id, message):
+    # Поддержка reply фото/видео/документов от админа пользователю
+    media_types = [
+        ('photo', 'sendPhoto', 'photo'),
+        ('video', 'sendVideo', 'video'),
+        ('document', 'sendDocument', 'document'),
+        ('audio', 'sendAudio', 'audio'),
+        ('voice', 'sendVoice', 'voice'),
+        ('animation', 'sendAnimation', 'animation'),
+        ('sticker', 'sendSticker', 'sticker')
+    ]
+    for key, endpoint, payload_key in media_types:
+        if key in message:
+            if key == 'photo':
+                photos = message[key]
+                if isinstance(photos, list) and len(photos) > 1:
+                    # Отправить альбом
+                    media_group = []
+                    for idx, ph in enumerate(photos):
+                        file_id = ph.get('file_id')
+                        obj = {'type': 'photo', 'media': file_id}
+                        if idx == 0 and ('caption' in message or 'text' in message):
+                            obj['caption'] = message.get('caption', message.get('text', ''))
+                        media_group.append(obj)
+                    send_media_group(user_id, media_group)
+                    return True
+                else:
+                    file_id = photos[-1]['file_id']
+                    url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
+                    payload = {
+                        'chat_id': user_id,
+                        payload_key: file_id
+                    }
+                    if 'caption' in message:
+                        payload['caption'] = message['caption']
+                    elif 'text' in message:
+                        payload['caption'] = message['text']
+                    requests.post(url, data=payload)
+                    return True
+            else:
+                file_id = message[key]['file_id'] if isinstance(message[key], dict) else message[key].get('file_id')
+                url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
+                payload = {
+                    'chat_id': user_id,
+                    payload_key: file_id
+                }
+                if 'caption' in message:
+                    payload['caption'] = message['caption']
+                elif 'text' in message:
+                    payload['caption'] = message['text']
+                requests.post(url, data=payload)
+                return True
+    return False
+
 def _get_reply_markup_for_admin(user_id: int):
     return {
         "inline_keyboard": [
@@ -368,12 +413,7 @@ def _get_reply_markup_for_admin(user_id: int):
         ]
     }
 
-# ====== Новый helper: строим расширённую карточку для админа ======
 def build_admin_info(message: dict, category: str = None) -> str:
-    """
-    Возвращает HTML-строку с расширённой информацией о сообщении и отправителе.
-    Использует только поля из update['message'] — не делает дополнительных API-вызовов.
-    """
     try:
         user = message.get('from', {})
         chat = message.get('chat', {})
@@ -381,11 +421,11 @@ def build_admin_info(message: dict, category: str = None) -> str:
         last = user.get('last_name', '') or ""
         username = user.get('username')
         user_id = user.get('id')
-        lang = user.get('language_code', '-')
-        is_bot = user.get('is_bot', False)
+        # lang = user.get('language_code', '-')
+        # is_bot = user.get('is_bot', False)
         is_premium = user.get('is_premium', False) if isinstance(user.get('is_premium', None), bool) else user.get('is_premium', None)
 
-        chat_type = chat.get('type', '-')
+        # chat_type = chat.get('type', '-')
         chat_title = chat.get('title') or ''
         msg_id = message.get('message_id')
         msg_date = message.get('date')
@@ -394,9 +434,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
         except Exception:
             date_str = str(msg_date or '-')
 
-        # Текст / caption
         text = message.get('text') or message.get('caption') or ''
-        # Entities summary (if any)
         entities = message.get('entities') or message.get('caption_entities') or []
         entities_summary = []
         for ent in entities:
@@ -405,7 +443,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
                 entities_summary.append(etype)
         entities_summary = ", ".join(entities_summary) if entities_summary else "-"
 
-        # Медиа summary: перечислим типы медиа и file_id(ы) для диагноза
         media_keys = []
         media_details = []
         media_candidates = [
@@ -416,7 +453,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
                 media_keys.append(k)
                 try:
                     if k == 'photo':
-                        # photo — список размерностей
                         photos = message.get('photo', [])
                         file_ids = [p.get('file_id') for p in photos if p.get('file_id')]
                         media_details.append(f"{k} (file_ids: {','.join(file_ids)})")
@@ -433,21 +469,18 @@ def build_admin_info(message: dict, category: str = None) -> str:
                         elif isinstance(message.get(k), list) and message.get(k) and isinstance(message.get(k)[-1], dict) and message.get(k)[-1].get('file_id'):
                             media_details.append(f"{k} (file_id: {message[k][-1].get('file_id')})")
                         else:
-                            # fallback
                             media_details.append(f"{k}")
                 except Exception:
                     media_details.append(k)
 
         media_summary = ", ".join(media_keys) if media_keys else "-"
 
-        # reply_to_message summary
         reply_info = "-"
         if 'reply_to_message' in message and isinstance(message['reply_to_message'], dict):
             r = message['reply_to_message']
             rfrom = r.get('from', {})
             rname = (rfrom.get('first_name','') or '') + ((' ' + rfrom.get('last_name')) if rfrom.get('last_name') else '')
             reply_info = f"id:{r.get('message_id','-')} from:{escape(rname or '-')}"
-        # build HTML
         parts = [
             "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>",
             "<b>📩 Нове повідомлення від користувача</b>",
@@ -455,7 +488,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
         ]
         if category:
             parts.append(f"<b>Категорія:</b> {escape(category)}")
-        # user block
         display_name = (first + (" " + last if last else "")).strip() or "Без імені"
         parts += [
             f"<b>Ім'я:</b> {escape(display_name)}",
@@ -463,15 +495,10 @@ def build_admin_info(message: dict, category: str = None) -> str:
         ]
         if username:
             parts.append(f"<b>Username:</b> @{escape(username)}")
-        parts += [
-            f"<b>Мова:</b> {escape(str(lang))}",
-            f"<b>Is bot:</b> {escape(str(is_bot))}",
-        ]
         if is_premium is not None:
             parts.append(f"<b>Is premium:</b> {escape(str(is_premium))}")
-        # chat & message meta
+        # Удалены строки: Мова, Is bot, Тип чату
         parts += [
-            f"<b>Тип чату:</b> {escape(str(chat_type))}" + (f" ({escape(chat_title)})" if chat_title else ""),
             f"<b>Message ID:</b> {escape(str(msg_id))}",
             f"<b>Дата:</b> {escape(str(date_str))}",
             f"<b>Entities:</b> {escape(entities_summary)}",
@@ -483,15 +510,32 @@ def build_admin_info(message: dict, category: str = None) -> str:
             "<i>Повідомлення відформатовано для зручного перегляду.</i>",
             "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
         ]
-        # join with newlines. We will send using parse_mode='HTML'
         return "\n".join(parts)
     except Exception as e:
         cool_error_handler(e, "build_admin_info")
-        # Fallback minimal info:
         try:
             return f"Повідомлення від користувача. ID: {escape(str(message.get('from', {}).get('id', '-')))}"
         except Exception:
             return "Нове повідомлення."
+
+def extract_media_group_from_message(message):
+    # Извлекает все фото или все видео (альбом) для передачи sendMediaGroup
+    types = ['photo', 'video']
+    for t in types:
+        if t in message and isinstance(message[t], list) and len(message[t]) > 1:
+            media_group = []
+            caption_sent = False
+            for idx, item in enumerate(message[t]):
+                file_id = item.get('file_id')
+                obj = {'type': t, 'media': file_id}
+                # Caption только для первого
+                if not caption_sent and ('caption' in message or 'text' in message):
+                    obj['caption'] = message.get('caption', message.get('text', ''))
+                    obj['parse_mode'] = 'HTML'
+                    caption_sent = True
+                media_group.append(obj)
+            return t, media_group
+    return None, None
 
 def forward_user_message_to_admin(message):
     try:
@@ -503,27 +547,31 @@ def forward_user_message_to_admin(message):
         msg_id = message.get('message_id')
         category = user_admin_category.get(user_chat_id, 'Без категорії')
 
-        # строим расширённую карточку
         admin_info = build_admin_info(message, category=category)
 
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
         if category in ADMIN_SUBCATEGORIES:
             save_event(category)
 
+        # Пересылка альбома медиа (если несколько файлов одного типа)
+        media_type, media_group = extract_media_group_from_message(message)
+        if media_group:
+            resp = send_media_group(ADMIN_ID, media_group, reply_markup=reply_markup)
+            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+            send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
+            return
+
         # пытаемся переслать оригинал; но даже если не получится, отправим расширённую карточку
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
             fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
             fwd_resp = requests.post(fwd_url, data=fwd_payload, timeout=5)
-            # отправляем карточку отдельно (чтобы всегда было форматирование)
             send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
             send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
             return
         except Exception as e:
             MainProtokol(f"forwardMessage failed (user): {str(e)}", "ForwardFail")
-            # продолжим и отправим карточку
 
-        # попытка отправки медиа (если есть) с подписью admin_info
         media_sent = False
         try:
             media_types = [
@@ -561,7 +609,7 @@ def forward_user_message_to_admin(message):
             cool_error_handler(e, context="forward_user_message_to_admin: sendMedia")
             MainProtokol(str(e), "SendMediaException")
             send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
-            send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст повідомленн" )
+            send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст повідомлення.")
     except Exception as e:
         cool_error_handler(e, context="forward_user_message_to_admin: unhandled")
         MainProtokol(str(e), "ForwardUnhandledException")
@@ -571,36 +619,36 @@ def forward_user_message_to_admin(message):
             cool_error_handler(err, context="forward_user_message_to_admin: notify user")
 
 def forward_ad_to_admin(message):
-    """
-    Отправляет рекламную заявку админу с расширенной информацией (HTML).
-    Упрощённая формулировка для пользователя — админ получает подробную карточку.
-    """
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
             send_message(message['chat']['id'], "⚠️ Адміністратор не налаштований.")
             return
 
         user_chat_id = message['chat']['id']
-        category = None  # для рекламы категория не используется, но можно передать
+        category = None
         admin_info = build_admin_info(message, category=category)
 
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
 
-        # Показываем админу "typing" перед отправкой
         if ADMIN_ID and ADMIN_ID != 0:
             send_chat_action(ADMIN_ID, 'typing')
             time.sleep(0.25)
 
-        # Пытаемся переслать оригинал (если есть), но в любом случае отправим карточку
+        # Проверяем альбом для рекламы
+        media_type, media_group = extract_media_group_from_message(message)
+        if media_group:
+            send_media_group(ADMIN_ID, media_group, reply_markup=reply_markup)
+            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+            send_message(user_chat_id, "✅ Дякуємо! Ваша заявка надіслана.")
+            return
+
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
             fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': message.get('message_id')}
             requests.post(fwd_url, data=fwd_payload, timeout=5)
         except Exception:
-            # игнорируем ошибки пересылки
             pass
 
-        # отправляем расширённую карточку админу
         send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
         send_message(user_chat_id, "✅ Дякуємо! Ваша заявка надіслана.")
         return
@@ -633,7 +681,6 @@ def format_stats_message(stats: dict) -> str:
         month = stats[cat]['month']
         lines.append(f"{name.ljust(max_cat_len)}  {str(week):>6}  {str(month):>6}")
     content = "\n".join(lines)
-    # рамка премиального вида
     return "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + content + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
@@ -683,14 +730,14 @@ def webhook():
             text = message.get('text', '')
             first_name = message['from'].get('first_name', 'Без імені')
 
-            # Ответ администратора пользователю
+            # Ответ администратора пользователю (добавлена поддержка медиа)
             if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
                 user_id = waiting_for_admin.pop(ADMIN_ID)
-                send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
+                if not send_admin_media_reply(user_id, message):
+                    send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
                 send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
                 return "ok", 200
 
-            # Главное меню
             if text == '/start':
                 send_chat_action(chat_id, 'typing')
                 time.sleep(0.25)
@@ -735,7 +782,7 @@ def webhook():
                     waiting_for_ad_message.add(chat_id)
                     send_message(
                             chat_id,
-                        "📣 Ви обрали розділ «Реклама». Надішліть текст та/або медіа — ми відформатуємо заявку у стильно та надішлемо Адміну",
+                        "📣 Ви обрали розділ «Реклама». Надішліть текст та/або медіа — ми відформатуємо заявку у стильному виді й передамо адміністратору.",
                     reply_markup=get_reply_buttons()
                     )
             elif text in ADMIN_SUBCATEGORIES:
