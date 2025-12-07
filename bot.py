@@ -336,6 +336,31 @@ def send_chat_action(chat_id, action='typing'):
     except Exception:
         pass
 
+# Прекрасное приветствие — делает бот «дорогим»
+def build_welcome_message(user: dict) -> str:
+    try:
+        first = (user.get('first_name') or "").strip()
+        last = (user.get('last_name') or "").strip()
+        display = (first + (" " + last if last else "")).strip() or "Друже"
+        is_premium = user.get('is_premium', False)
+        vip_badge = " ✨" if is_premium else ""
+        name_html = escape(display)
+        msg = (
+            "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>\n"
+            f"<b>✨ Ласкаво просимо, {name_html}{vip_badge}!</b>\n\n"
+            "<i>Ви опинилися у преміальному інтерфейсі нашого сервісу.</i>\n\n"
+            "<b>Що доступно прямо зараз:</b>\n"
+            "• 📝 Швидко повідомити про подію\n"
+            "• 📊 Переглянути статистику по категоріях\n"
+            "• 📣 Надіслати рекламне повідомлення\n\n"
+            "<i>Натисніть одну з кнопок внизу, щоб почати.</i>\n"
+            "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
+        )
+        return msg
+    except Exception as e:
+        cool_error_handler(e, "build_welcome_message")
+        return "Ласкаво просимо! Використайте меню для початку."
+
 # ====== Отправка сообщений (parse_mode поддерживается) ======
 def send_message(chat_id, text, reply_markup=None, parse_mode=None, timeout=8):
     if not TOKEN:
@@ -369,20 +394,60 @@ def _get_reply_markup_for_admin(user_id: int):
 
 # ====== Новый helper: строим расширённую карточку для админа ======
 def build_admin_info(message: dict, category: str = None) -> str:
+    """
+    Обновленная, окультуренная карточка для админа:
+    - Убираем поля: language, is_bot, тип чата (как минимум).
+    - Добавляем аккуратный профиль пользователя: имя, ссылка на профиль (если есть username) или tg://user?id=,
+      ID, признак премиума (значок), контакт/телефон (если прислан), локейшн (если прислан).
+    - Сохраняем информацию о медиа/типах и тексте, но оформляем более компактно и читабельно.
+    """
     try:
-        user = message.get('from', {})
-        chat = message.get('chat', {})
-        first = user.get('first_name', '') or ""
-        last = user.get('last_name', '') or ""
+        user = message.get('from', {}) or {}
+        chat = message.get('chat', {}) or {}
+        first = (user.get('first_name') or "").strip()
+        last = (user.get('last_name') or "").strip()
         username = user.get('username')
         user_id = user.get('id')
-        lang = user.get('language_code', '-')
-        is_bot = user.get('is_bot', False)
         is_premium = user.get('is_premium', None)
 
-        chat_type = chat.get('type', '-')
-        chat_title = chat.get('title') or ''
-        msg_id = message.get('message_id')
+        # Display name
+        display_name = (first + (" " + last if last else "")).strip() or "Без імені"
+        display_html = escape(display_name)
+
+        # Profile link: prefer t.me/username if present, otherwise tg://user?id=
+        if username:
+            profile_url = f"https://t.me/{username}"
+            profile_label = f"@{escape(username)}"
+            profile_html = f"<a href=\"{profile_url}\">{profile_label}</a>"
+        else:
+            profile_url = f"tg://user?id={user_id}"
+            profile_label = "Відкрити профіль"
+            profile_html = f"<a href=\"{profile_url}\">{escape(profile_label)}</a>"
+
+        # Contact and location if present in the message (these are commonly present in forwarded contact/location)
+        contact = message.get('contact')
+        contact_html = ""
+        if isinstance(contact, dict):
+            phone = contact.get('phone_number')
+            contact_name = (contact.get('first_name') or "") + ((" " + contact.get('last_name')) if contact.get('last_name') else "")
+            contact_parts = []
+            if contact_name:
+                contact_parts.append(escape(contact_name.strip()))
+            if phone:
+                contact_parts.append(escape(phone))
+            if contact_parts:
+                contact_html = ", ".join(contact_parts)
+
+        location = message.get('location')
+        location_html = ""
+        if isinstance(location, dict):
+            lat = location.get('latitude')
+            lon = location.get('longitude')
+            if lat is not None and lon is not None:
+                location_html = f"{lat}, {lon}"
+
+        # Message meta
+        msg_id = message.get('message_id', '-')
         msg_date = message.get('date')
         try:
             date_str = datetime.datetime.utcfromtimestamp(int(msg_date)).strftime('%Y-%m-%d %H:%M:%S UTC') if msg_date else '-'
@@ -393,6 +458,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
         entities = message.get('entities') or message.get('caption_entities') or []
         entities_summary = ", ".join(e.get('type') for e in entities if e.get('type')) or "-"
 
+        # Media summary: list present media keys in a compact form
         media_keys = []
         media_candidates = ['photo', 'video', 'document', 'audio', 'voice', 'animation', 'sticker', 'contact', 'location']
         for k in media_candidates:
@@ -400,6 +466,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
                 media_keys.append(k)
         media_summary = ", ".join(media_keys) if media_keys else "-"
 
+        # Reply information (if the message is a reply)
         reply_info = "-"
         if 'reply_to_message' in message and isinstance(message['reply_to_message'], dict):
             r = message['reply_to_message']
@@ -407,39 +474,57 @@ def build_admin_info(message: dict, category: str = None) -> str:
             rname = (rfrom.get('first_name','') or '') + ((' ' + rfrom.get('last_name')) if rfrom.get('last_name') else '')
             reply_info = f"id:{r.get('message_id','-')} from:{escape(rname or '-')}"
 
-        parts = [
-            "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>",
-            "<b>📩 Нове повідомлення від користувача</b>",
-            ""
-        ]
-        if category:
-            parts.append(f"<b>Категорія:</b> {escape(category)}")
-        display_name = (first + (" " + last if last else "")).strip() or "Без імені"
-        parts += [
-            f"<b>Ім'я:</b> {escape(display_name)}",
-            f"<b>ID:</b> {escape(str(user_id)) if user_id is not None else '-'}",
-        ]
-        if username:
-            parts.append(f"<b>Username:</b> @{escape(username)}")
-        parts += [
-            f"<b>Мова:</b> {escape(str(lang))}",
-            f"<b>Is bot:</b> {escape(str(is_bot))}",
-        ]
-        if is_premium is not None:
-            parts.append(f"<b>Is premium:</b> {escape(str(is_premium))}")
-        parts += [
-            f"<b>Тип чату:</b> {escape(str(chat_type))}" + (f" ({escape(chat_title)})" if chat_title else ""),
-            f"<b>Message ID:</b> {escape(str(msg_id))}",
-            f"<b>Дата:</b> {escape(str(date_str))}",
-            f"<b>Entities:</b> {escape(entities_summary)}",
-            f"<b>Reply to:</b> {escape(reply_info)}",
-            f"<b>Медіа:</b> {escape(media_summary)}",
-            "<b>Текст / Опис:</b>",
-            "<pre>{}</pre>".format(escape(text)) if text else "<i>Немає тексту</i>",
-            "",
-            "<i>Повідомлення відформатовано для зручного перегляду. </i>",
-            "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
-        ]
+        # Category (если передано)
+        category_html = escape(category) if category else None
+
+        # Собираем аккуратно оформленную карточку
+        parts = []
+        parts.append("<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>")
+        parts.append("<b>📩 Нове повідомлення</b>")
+        parts.append("")
+
+        # Профиль — крупно
+        name_line = f"<b>{display_html}</b>"
+        if is_premium:
+            name_line += " ✨"
+        parts.append(name_line)
+
+        # Профиль и ID
+        parts.append(f"<b>Профіль:</b> {profile_html}")
+        parts.append(f"<b>ID:</b> {escape(str(user_id)) if user_id is not None else '-'}")
+
+        # Контакт / Локація (если есть)
+        if contact_html:
+            parts.append(f"<b>Телефон:</b> {contact_html}")
+        if location_html:
+            parts.append(f"<b>Локація:</b> {escape(location_html)}")
+
+        # Категорія (если есть)
+        if category_html:
+            parts.append(f"<b>Категорія:</b> {category_html}")
+
+        # Техническая краткая секция (без лишних полей)
+        parts.append("")
+        parts.append(f"<b>Message ID:</b> {escape(str(msg_id))}")
+        parts.append(f"<b>Дата:</b> {escape(str(date_str))}")
+        parts.append(f"<b>Медіа:</b> {escape(media_summary)}")
+        parts.append(f"<b>Entities:</b> {escape(entities_summary)}")
+        parts.append(f"<b>Reply to:</b> {escape(reply_info)}")
+
+        # Текст / Описание — моноширинный блок
+        parts.append("")
+        if text:
+            # Ограничим длину отображаемого текста для аккуратности
+            display_text = text if len(text) <= 2000 else text[:1997] + "..."
+            parts.append("<b>Текст / Опис:</b>")
+            parts.append("<pre>{}</pre>".format(escape(display_text)))
+        else:
+            parts.append("<i>Немає тексту</i>")
+
+        parts.append("")
+        parts.append("<i>Повідомлення відформатовано для зручного перегляду.</i>")
+        parts.append("<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>")
+
         return "\n".join(parts)
     except Exception as e:
         cool_error_handler(e, "build_admin_info")
@@ -470,7 +555,7 @@ def _collect_media_summary_and_payloads(msgs):
     Принцип:
       - Собрать все media items (photo, video, animation) для отправки через sendMediaGroup (если >=2) или sendPhoto/sendVideo (если 1).
       - Документы собираются в список doc_msgs, будут отправляться по одному.
-      - Тексты: если присутсвует медиа, объединить тексты и использовать как caption (на первом элементе),
+      - Тексты: если присутствует медиа, объединить тексты и использовать как caption (на первом элементе),
         если caption слишком длинный или нет медиа — отправить как отдельное сообщение.
     Возвращает: media_items(list), doc_msgs(list), leftover_texts(list)
     """
@@ -777,9 +862,11 @@ def webhook():
             if text == '/start':
                 send_chat_action(chat_id, 'typing')
                 time.sleep(0.25)
+                user = message.get('from', {})
+                welcome = build_welcome_message(user)
                 send_message(
                     chat_id,
-                    "✨ Ласкаво просимо!\n\nОберіть дію в меню нижче:",
+                    welcome,
                     reply_markup=get_reply_buttons(),
                     parse_mode='HTML'
                 )
