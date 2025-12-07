@@ -126,7 +126,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", ""). strip()
 if DATABASE_URL:
     db_url = DATABASE_URL
 else:
-    default_sqlite = os.path.join(os. path.dirname(os.path.abspath(__file__)), "events.db")
+    default_sqlite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
     db_url = f"sqlite:///{default_sqlite}"
 
 _engine: Engine = None
@@ -234,7 +234,7 @@ def get_stats():
                 q_week = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :week GROUP BY category")
                 q_month = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :month GROUP BY category")
                 wk = conn.execute(q_week, {"week": week_ts}).all()
-                mo = conn.execute(q_month, {"month": month_ts}).all()
+                mo = conn.execute(q_month, {"month": month_ts}). all()
             else:
                 q_week = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :week GROUP BY category")
                 q_month = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :month GROUP BY category")
@@ -260,9 +260,9 @@ def clear_stats_if_month_passed():
     try:
         engine = get_engine()
         now = datetime.datetime.utcnow()
-        month_threshold = now - datetime. timedelta(days=30)
+        month_threshold = now - datetime.timedelta(days=30)
         with engine.begin() as conn:
-            if engine.dialect. name == "sqlite":
+            if engine.dialect.name == "sqlite":
                 month_ts = month_threshold.isoformat()
                 conn.execute(text("DELETE FROM events WHERE dt < :month"), {"month": month_ts})
             else:
@@ -283,7 +283,7 @@ init_db()
 
 # ====== Конфигурация ======
 TOKEN = os.getenv("API_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(os. getenv("ADMIN_ID", "0"))
 WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{TOKEN}"
 
 # ====== Установка webhook ======
@@ -296,7 +296,7 @@ def set_webhook():
             f"https://api.telegram.org/bot{TOKEN}/setWebhook",
             params={"url": WEBHOOK_URL}
         )
-        if r.ok:
+        if r. ok:
             print("Webhook успешно установлен!")
         else:
             print("Ошибка при установке webhook:", r.text)
@@ -397,7 +397,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
             f"<b>ID:</b> {escape(str(user_id)) if user_id is not None else '-'}",
         ]
         if username:
-            parts.append(f"<b>Username:</b> @{escape(username)}")
+            parts. append(f"<b>Username:</b> @{escape(username)}")
         parts += [
             f"<b>Мова:</b> {escape(str(lang))}",
             f"<b>Is bot:</b> {escape(str(is_bot))}",
@@ -464,42 +464,51 @@ def send_compiled_media_to_admin(chat_id):
         elif 'document' in msg:
             doc_msgs.append(msg)
         elif 'text' in msg and msg['text']. strip():
-            text_msgs. append(msg['text'])
+            text_msgs.append(msg['text'])
+    
     m_category = None
     if pending_mode. get(chat_id) == "event":
         m_category = user_admin_category.get(chat_id, 'Без категорії')
         if m_category in ADMIN_SUBCATEGORIES:
             save_event(m_category)
+    
     admin_info = build_admin_info(msgs[0], category=m_category)
+    
+    # ===== ОТПРАВЛЯЕМ ИНФОРМАЦИЮ ПЕРВОЙ =====
+    send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
+    
+    # ===== ПОТОМ МЕДИАФАЙЛЫ =====
     if media_items:
-        media_items[0]["caption"] = admin_info
+        # Убираем caption из медиагруппы (информация уже отправлена выше)
         url = f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup"
         payload = {
             "chat_id": ADMIN_ID,
             "media": json.dumps(media_items)
         }
-        if reply_markup:
-            payload['reply_markup'] = json.dumps(reply_markup)
         try:
             requests.post(url, data=payload)
         except Exception as e:
             MainProtokol(f"sendMediaGroup error: {str(e)}", "MediaGroupFail")
+    
+    # Документы отправляем по одному
     for dmsg in doc_msgs:
         file_id = dmsg['document']['file_id']
+        filename = dmsg. get('document', {}).get('file_name', 'документ')
         payload = {
             "chat_id": ADMIN_ID,
             "document": file_id,
-            "caption": admin_info,
-            "parse_mode": "HTML"
+            "caption": f"📎 {escape(filename)}"  # Только имя файла в подписи
         }
-        if reply_markup:
-            payload['reply_markup'] = json.dumps(reply_markup)
         try:
-            requests. post(f"https://api.telegram.org/bot{TOKEN}/sendDocument", data=payload)
+            requests.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument", data=payload)
         except Exception as e:
             MainProtokol(f"sendDocument error: {str(e)}", "DocumentFail")
+    
+    # Текстовые сообщения отправляем отдельно (если нет медиа)
     if text_msgs and not media_items and not doc_msgs:
-        send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
+        for txt in text_msgs:
+            send_message(ADMIN_ID, f"<b>Текст від користувача:</b>\n<pre>{escape(txt)}</pre>", parse_mode="HTML")
+    
     pending_media.pop(chat_id, None)
     pending_mode.pop(chat_id, None)
 
@@ -513,7 +522,7 @@ def flask_global_error_handler(e):
 def format_stats_message(stats: dict) -> str:
     cat_names = [c for c in ADMIN_SUBCATEGORIES]
     max_cat_len = max(len(escape(c)) for c in cat_names) + 1
-    col1 = "Категорія". ljust(max_cat_len)
+    col1 = "Категорія".ljust(max_cat_len)
     header = f"{col1}  {'7 дн':>6}  {'30 дн':>6}"
     lines = [header, "-" * (max_cat_len + 16)]
     for cat in ADMIN_SUBCATEGORIES:
@@ -614,7 +623,7 @@ def webhook():
                 elif text == "🕰️ Графік роботи":
                     send_message(
                         chat_id,
-                        "Ми працюємо цілодобово.  Звертайтесь у будь-який час."
+                        "Ми працюємо цілодобово. Звертайтесь у будь-який час."
                     )
                 elif text == "📝 Повідомити про подію":
                     desc = (
