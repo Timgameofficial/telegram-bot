@@ -392,15 +392,15 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None, timeout=8):
         MainProtokol(str(e), 'Помилка мережі')
         return None
 
-# ====== Inline reply markup для админа (теперь с кнопкой "додати до статистики") ======
-def _get_reply_markup_for_admin(user_id: int, orig_chat_id: int = None, orig_msg_id: int = None):
+# ====== Inline reply markup для админа (теперь с кнопкой "додати до статистики", опционально) ======
+def _get_reply_markup_for_admin(user_id: int, orig_chat_id: int = None, orig_msg_id: int = None, allow_addstat: bool = True):
     kb = {
         "inline_keyboard": [
             [{"text": "✉️ Відповісти", "callback_data": f"reply_{user_id}"}]
         ]
     }
-    # Если известны оригинальные id — добавляем кнопку добавления в статистику
-    if orig_chat_id is not None and orig_msg_id is not None:
+    # Добавляем кнопку добавления в статистику только если разрешено и есть оригинальные id
+    if allow_addstat and orig_chat_id is not None and orig_msg_id is not None:
         kb["inline_keyboard"][0].append({"text": "➕ Додати до статистики", "callback_data": f"addstat_{orig_chat_id}_{orig_msg_id}"})
     return kb
 
@@ -712,10 +712,14 @@ def send_compiled_media_to_admin(chat_id):
     if not msgs:
         send_message(chat_id, "Немає медіа для надсилання.")
         return
-    m_category = None
+    # определим, был ли это event-режим для данного чата
     with GLOBAL_LOCK:
-        if pending_mode.get(chat_id) == "event":
+        is_event_mode = (pending_mode.get(chat_id) == "event")
+        if is_event_mode:
             m_category = user_admin_category.get(chat_id, 'Без категорії')
+        else:
+            m_category = None
+
     if m_category in ADMIN_SUBCATEGORIES:
         try:
             save_event(m_category)
@@ -724,11 +728,13 @@ def send_compiled_media_to_admin(chat_id):
 
     media_items, doc_msgs, leftover_texts = _collect_media_summary_and_payloads(msgs)
     # orig identifiers from the first user message
-    orig_chat_id = msgs[0]['chat']['id']
+    orig_chat_id = msgs[0].get('chat', {}).get('id')
     orig_msg_id = msgs[0].get('message_id')
     orig_user_id = msgs[0].get('from', {}).get('id')
+    # если сообщение пришло в режиме "повідомити про подію", запретим кнопку addstat
+    allow_addstat = not is_event_mode
     admin_info = build_admin_info(msgs[0], category=m_category)
-    reply_markup = _get_reply_markup_for_admin(orig_user_id, orig_chat_id, orig_msg_id)
+    reply_markup = _get_reply_markup_for_admin(orig_user_id, orig_chat_id, orig_msg_id, allow_addstat=allow_addstat)
     send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
 
     try:
@@ -1103,7 +1109,9 @@ def webhook():
                     orig_msg_id = message.get('message_id')
                     admin_info = build_admin_info(message)
                     orig_user_id = message.get('from', {}).get('id')
-                    reply_markup = _get_reply_markup_for_admin(orig_user_id, orig_chat_id, orig_msg_id)
+                    # allow_addstat=True для обычных сообщений; если вы хотите особо запретить addstat в некоторых случаях —
+                    # можно проверить pending_mode[orig_chat_id] здесь, но default flow уже запрещает addstat для сообщений собранных через "Повідомити про подію"
+                    reply_markup = _get_reply_markup_for_admin(orig_user_id, orig_chat_id, orig_msg_id, allow_addstat=True)
                     send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
                     send_message(chat_id, "Дякуємо! Ваше повідомлення отримано — наш адміністратор перевірить його.", reply_markup=get_reply_buttons())
 
