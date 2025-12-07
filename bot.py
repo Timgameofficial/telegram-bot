@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import ArgumentError
 
-# ======================= ПРЕМІУМ ЛОГУВАННЯ =======================
+# =========================== ПРЕМІУМ ЛОГУВАННЯ ===========================
 def MainProtokol(s, ts='Запис'):
     dt = time.strftime('%d.%m.%Y %H:%M:') + '00'
     try:
@@ -65,46 +65,28 @@ def cool_error_handler(exc, context="", send_to_telegram=False):
 
 def time_debugger():
     while True:
-        print("[PREMIUM DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
+        print("[ПРЕМІУМ DEBUG]", time.strftime('%Y-%m-%d %H:%M:%S'))
         time.sleep(300)
 
-# ======================= ПРЕМІАЛЬНЕ МЕНЮ І ВИД РОБОТИ ========================
+# =========================== ПРЕМІУМ МЕНЮ ===========================
 MAIN_MENU = [
     "💎 Головне",
     "📢 Про нас",
     "🕰️ Графік роботи",
     "📝 Повідомити про подію",
     "📊 Статистика подій",
-    "📣 Реклама",
-    "💼 Вид роботи"
+    "📣 Реклама"
 ]
-
-WORK_TYPES = [
-    "🕹️ Збір інформації",
-    "⏳ Очікує обробки",
-    "✔️ Оброблено",
-    "🔒 Закрито"
-]
-
-user_work_type = {}
 
 def get_reply_buttons():
     return {
         "keyboard": [
             [{"text": "📣 Реклама"}],
-            [{"text": "💼 Вид роботи"}],
             [{"text": "📢 Про нас"}, {"text": "🕰️ Графік роботи"}],
             [{"text": "📝 Повідомити про подію"}, {"text": "📊 Статистика подій"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
-    }
-
-def get_work_type_buttons():
-    return {
-        "keyboard": [[{"text": t}] for t in WORK_TYPES],
-        "resize_keyboard": True,
-        "one_time_keyboard": True
     }
 
 ADMIN_SUBCATEGORIES = [
@@ -143,19 +125,19 @@ def get_engine():
                 raise ValueError("DATABASE_URL порожній")
             if db_url.startswith("sqlite:///"):
                 _engine = create_engine(db_url, connect_args={"check_same_thread": False}, future=True)
-                print(f"[PREMIUM DEBUG] Використовується SQLite: {db_url}")
+                print(f"[ПРЕМІУМ DEBUG] Використовується SQLite: {db_url}")
             else:
                 if '://' not in db_url:
                     raise ArgumentError(f"Невалідний DB URL: {db_url}")
                 _engine = create_engine(db_url, future=True)
-                print(f"[PREMIUM DEBUG] Використовується DB URL: {db_url}")
+                print(f"[ПРЕМІУМ DEBUG] Використовується DB URL: {db_url}")
         except Exception as e:
             cool_error_handler(e, "get_engine")
             try:
                 fallback_sqlite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
                 fallback_url = f"sqlite:///{fallback_sqlite}"
                 _engine = create_engine(fallback_url, connect_args={"check_same_thread": False}, future=True)
-                print(f"[PREMIUM WARN] Перехід на SQLite через помилки.")
+                print(f"[ПРЕМІУМ WARN] Перехід на SQLite через помилки.")
             except Exception as e2:
                 cool_error_handler(e2, "get_engine (fallback sqlite)")
                 raise
@@ -186,7 +168,7 @@ def init_db():
                 cnt = res.scalar() if res is not None else 0
             except Exception:
                 cnt = 0
-            print(f"[PREMIUM DEBUG] Кількість рядків у events після ініціалізації: {cnt}")
+            print(f"[ПРЕМІУМ DEBUG] Кількість рядків у events після ініціалізації: {cnt}")
     except Exception as e:
         cool_error_handler(e, "init_db")
 
@@ -406,7 +388,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
         is_premium = user.get('is_premium', None)
         msg_id = message.get('message_id')
         msg_date = message.get('date')
-        work_type = user_work_type.get(message['chat']['id'], "🕹️ Збір інформації")
         try:
             date_str = datetime.datetime.utcfromtimestamp(int(msg_date)).strftime('%Y-%m-%d %H:%M:%S UTC') if msg_date else '-'
         except Exception:
@@ -434,7 +415,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
         ]
         if category:
             parts.append(f"<b>Категорія:</b> {escape(category)}")
-        parts.append(f"<b>Вид роботи:</b> {escape(work_type)}")
         display_name = (first + (" " + last if last else "")).strip() or "Без імені"
         parts += [
             f"<b>👤 Ім'я:</b> {escape(display_name)}",
@@ -680,7 +660,6 @@ def webhook():
             chat_id = message['chat']['id']
             from_id = message['from']['id']
             text = message.get('text', '')
-            first_name = message['from'].get('first_name', 'Користувач')
             # Адмін-відповідь з підтримкою преміум медіа
             if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
                 user_id = waiting_for_admin.pop(ADMIN_ID)
@@ -688,20 +667,19 @@ def webhook():
                     send_message(user_id, f"💬 Відповідь адміністратора:\n{text}", parse_mode='HTML')
                 send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу <b>{user_id}</b> 💎", parse_mode='HTML')
                 return "ok", 200
-            # Персоналізоване преміум-привітання та логіка
+            # Головне меню
             if text == '/start':
                 send_chat_action(chat_id, 'typing')
                 time.sleep(0.25)
                 send_message(
                     chat_id,
-                    f"<b>✨ Вітаємо, {escape(first_name)}!</b>\n\n"
-                    "Обирайте дію в ексклюзивному меню нижче:",
+                    "<b>✨ Ласкаво просимо до PremiumBot!</b>\n\nОбирайте дію в ексклюзивному меню нижче:",
                     reply_markup=get_reply_buttons(),
                     parse_mode='HTML'
                 )
             elif text in MAIN_MENU:
                 if text == "💎 Головне":
-                    send_message(chat_id, f"✨ Вітаємо, {escape(first_name)}! Ви у головному преміум-меню.", reply_markup=get_reply_buttons(), parse_mode='HTML')
+                    send_message(chat_id, "✨ Ви у головному преміум-меню.", reply_markup=get_reply_buttons(), parse_mode='HTML')
                 elif text == "📢 Про нас":
                     send_message(
                         chat_id,
@@ -713,13 +691,6 @@ def webhook():
                     send_message(
                         chat_id,
                         "🕰️ PremiumBot працює цілодобово. Звертайтеся у будь-який час!",
-                        parse_mode='HTML'
-                    )
-                elif text == "💼 Вид роботи":
-                    send_message(
-                        chat_id,
-                        "💼 Оберіть вид роботи для вашого звернення:",
-                        reply_markup=get_work_type_buttons(),
                         parse_mode='HTML'
                     )
                 elif text == "📝 Повідомити про подію":
@@ -748,14 +719,6 @@ def webhook():
                         reply_markup=get_reply_buttons(),
                         parse_mode='HTML'
                     )
-            elif text in WORK_TYPES:
-                user_work_type[chat_id] = text
-                send_message(
-                    chat_id,
-                    f"🌟 Ви обрали тип роботи: <b>{escape(text)}</b>.\nДалі можете повідомити про подію або перейти до меню.",
-                    reply_markup=get_reply_buttons(),
-                    parse_mode='HTML'
-                )
             elif text in ADMIN_SUBCATEGORIES:
                 user_admin_category[chat_id] = text
                 waiting_for_admin_message.add(chat_id)
