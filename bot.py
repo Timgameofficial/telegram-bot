@@ -233,8 +233,8 @@ def get_stats():
                 month_ts = month_threshold.isoformat()
                 q_week = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :week GROUP BY category")
                 q_month = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :month GROUP BY category")
-                wk = conn.execute(q_week, {"week": week_ts}). all()
-                mo = conn.execute(q_month, {"month": month_ts}).all()
+                wk = conn.execute(q_week, {"week": week_ts}).all()
+                mo = conn.execute(q_month, {"month": month_ts}). all()
             else:
                 q_week = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :week GROUP BY category")
                 q_month = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :month GROUP BY category")
@@ -283,7 +283,7 @@ init_db()
 
 # ====== Конфигурация ======
 TOKEN = os.getenv("API_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(os. getenv("ADMIN_ID", "0"))
 WEBHOOK_URL = f"https://telegram-bot-1-g3bw.onrender.com/webhook/{TOKEN}"
 
 # ====== Установка webhook ======
@@ -366,7 +366,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
         except Exception:
             date_str = str(msg_date or '-')
 
-        text = message. get('text') or message.get('caption') or ''
+        text = message.get('text') or message.get('caption') or ''
         entities = message.get('entities') or message.get('caption_entities') or []
         entities_summary = ", ".join(e.get('type') for e in entities if e.get('type')) or "-"
 
@@ -397,7 +397,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
             f"<b>ID:</b> {escape(str(user_id)) if user_id is not None else '-'}",
         ]
         if username:
-            parts.append(f"<b>Username:</b> @{escape(username)}")
+            parts. append(f"<b>Username:</b> @{escape(username)}")
         parts += [
             f"<b>Мова:</b> {escape(str(lang))}",
             f"<b>Is bot:</b> {escape(str(is_bot))}",
@@ -414,7 +414,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
             "<b>Текст / Опис:</b>",
             "<pre>{}</pre>".format(escape(text)) if text else "<i>Немає тексту</i>",
             "",
-            "<i>Повідомлення відформатовано для зручного перегляду.</i>",
+            "<i>Повідомлення відформатовано для зручного перегляду. </i>",
             "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
         ]
         return "\n".join(parts)
@@ -450,7 +450,6 @@ def send_compiled_media_to_admin(chat_id):
     media_items = []
     doc_msgs = []
     text_msgs = []
-    
     for msg in msgs:
         if 'photo' in msg:
             file_id = msg['photo'][-1]['file_id']
@@ -468,7 +467,7 @@ def send_compiled_media_to_admin(chat_id):
             text_msgs.append(msg['text'])
     
     m_category = None
-    if pending_mode.get(chat_id) == "event":
+    if pending_mode. get(chat_id) == "event":
         m_category = user_admin_category.get(chat_id, 'Без категорії')
         if m_category in ADMIN_SUBCATEGORIES:
             save_event(m_category)
@@ -477,11 +476,11 @@ def send_compiled_media_to_admin(chat_id):
     
     # ===== ОТПРАВЛЯЕМ ИНФОРМАЦИЮ ПЕРВОЙ =====
     send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
-    time.sleep(0.5)  # Небольшая задержка для порядка отправки
     
-    # ===== ПОТОМ МЕДИАФАЙЛЫ (ФОТО/ВИДЕО) =====
+    # ===== ПОТОМ МЕДИАФАЙЛЫ =====
     if media_items:
-        url = f"https://api.telegram. org/bot{TOKEN}/sendMediaGroup"
+        # Убираем caption из медиагруппы (информация уже отправлена выше)
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup"
         payload = {
             "chat_id": ADMIN_ID,
             "media": json.dumps(media_items)
@@ -490,29 +489,25 @@ def send_compiled_media_to_admin(chat_id):
             requests.post(url, data=payload)
         except Exception as e:
             MainProtokol(f"sendMediaGroup error: {str(e)}", "MediaGroupFail")
-        time.sleep(0.5)
     
-    # ===== ДОКУМЕНТЫ ОТПРАВЛЯЕМ ПО ОДНОМУ =====
+    # Документы отправляем по одному
     for dmsg in doc_msgs:
         file_id = dmsg['document']['file_id']
         filename = dmsg. get('document', {}).get('file_name', 'документ')
         payload = {
             "chat_id": ADMIN_ID,
             "document": file_id,
-            "caption": f"📎 {escape(filename)}"
+            "caption": f"📎 {escape(filename)}"  # Только имя файла в подписи
         }
         try:
             requests.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument", data=payload)
         except Exception as e:
             MainProtokol(f"sendDocument error: {str(e)}", "DocumentFail")
-        time.sleep(0.3)
     
-    # ===== ТЕКСТОВЫЕ СООБЩЕНИЯ ОТПРАВЛЯЕМ ВСЕГДА =====
-    # (Исправлено: убрано условие "if text_msgs and not media_items and not doc_msgs")
-    if text_msgs:
+    # Текстовые сообщения отправляем отдельно (если нет медиа)
+    if text_msgs and not media_items and not doc_msgs:
         for txt in text_msgs:
             send_message(ADMIN_ID, f"<b>Текст від користувача:</b>\n<pre>{escape(txt)}</pre>", parse_mode="HTML")
-            time.sleep(0.3)
     
     pending_media.pop(chat_id, None)
     pending_mode.pop(chat_id, None)
@@ -527,7 +522,7 @@ def flask_global_error_handler(e):
 def format_stats_message(stats: dict) -> str:
     cat_names = [c for c in ADMIN_SUBCATEGORIES]
     max_cat_len = max(len(escape(c)) for c in cat_names) + 1
-    col1 = "Категорія". ljust(max_cat_len)
+    col1 = "Категорія".ljust(max_cat_len)
     header = f"{col1}  {'7 дн':>6}  {'30 дн':>6}"
     lines = [header, "-" * (max_cat_len + 16)]
     for cat in ADMIN_SUBCATEGORIES:
@@ -597,7 +592,7 @@ def webhook():
                     send_message(chat_id, "❌ Скасовано.", reply_markup=get_reply_buttons())
                     return "ok", 200
                 else:
-                    pending_media.setdefault(chat_id, []).append(message)
+                    pending_media. setdefault(chat_id, []).append(message)
                     return "ok", 200
 
             # Ответ администратора пользователю
