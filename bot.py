@@ -15,6 +15,10 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import ArgumentError
 
+# ====== Конфигурация дополнительных опций ======
+# Если True — уведомлять пользователя, когда админ добавляет его сообщение в статистику
+NOTIFY_USER_ON_ADD_STAT = True
+
 # ====== Логирование ======
 def MainProtokol(s, ts='Запис'):
     dt = time.strftime('%d.%m.%Y %H:%M:') + '00'
@@ -121,6 +125,9 @@ waiting_for_ad_message = set()
 pending_mode = {}   # chat_id -> "ad"|"event"
 pending_media = {}  # chat_id -> list of message dicts
 waiting_for_admin = {}
+
+# НОВОЕ: флоу добавления події адміністратором
+admin_adding_event = {}  # admin_id -> {'category': str, 'messages': [msg_dicts]}
 
 # Блокировка для потокобезопасных операций над глобальными структурами
 GLOBAL_LOCK = threading.Lock()
@@ -385,21 +392,20 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None, timeout=8):
         MainProtokol(str(e), 'Помилка мережі')
         return None
 
-def _get_reply_markup_for_admin(user_id: int):
-    return {
+# ====== Inline reply markup для админа (теперь с кнопкой "додати до статистики") ======
+def _get_reply_markup_for_admin(user_id: int, orig_chat_id: int = None, orig_msg_id: int = None):
+    kb = {
         "inline_keyboard": [
             [{"text": "✉️ Відповісти", "callback_data": f"reply_{user_id}"}]
         ]
     }
+    # Если известны оригинальные id — добавляем кнопку добавления в статистику
+    if orig_chat_id is not None and orig_msg_id is not None:
+        kb["inline_keyboard"][0].append({"text": "➕ Додати до статистики", "callback_data": f"addstat_{orig_chat_id}_{orig_msg_id}"})
+    return kb
 
 # ====== Новый helper: строим расширённую карточку для админа (окультуренная) ======
 def build_admin_info(message: dict, category: str = None) -> str:
-    """
-    Окультуренная карточка для админа:
-    - Минимально: отображаем профиль (имя, ссылка/username), ID, телефон/локацию (если есть), категория (если есть),
-      Message ID и дату, а также текст (если есть).
-    - Убираем: language, is_bot, тип чата, media:..., entities, reply to и "Немає тексту".
-    """
     try:
         user = message.get('from', {}) or {}
         first = (user.get('first_name') or "").strip()
@@ -481,7 +487,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
         parts.append(f"<b>Message ID:</b> {escape(str(msg_id))}")
         parts.append(f"<b>Дата:</b> {escape(str(date_str))}")
 
-        # show text only if present (no "Немає тексту" placeholder)
+        # show text only if present
         if text:
             display_text = text if len(text) <= 2000 else text[:1997] + "..."
             parts.append("")
@@ -512,12 +518,6 @@ def _post_request(url, data=None, files=None, timeout=10):
         return None
 
 def forward_admin_message_to_user(user_id: int, admin_msg: dict):
-    """
-    Пересылает сообщение от админа пользователю, поддерживает:
-      - text (как форматированный ответ, текст экранируется)
-      - photo, video, animation, document, audio, voice (передается file_id)
-      - contact/location — преобразуются в текст
-    """
     try:
         if not user_id:
             return False
@@ -525,7 +525,6 @@ def forward_admin_message_to_user(user_id: int, admin_msg: dict):
         caption = admin_msg.get('caption') or admin_msg.get('text') or ""
         safe_caption = escape(caption) if caption else None
 
-        # Photos
         if 'photo' in admin_msg:
             file_id = admin_msg['photo'][-1].get('file_id')
             url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
@@ -595,7 +594,6 @@ def forward_admin_message_to_user(user_id: int, admin_msg: dict):
             _post_request(url, data=payload)
             return True
 
-        # contact / location -> textual representation
         if 'contact' in admin_msg:
             c = admin_msg['contact']
             name = ((c.get('first_name') or "") + (" " + (c.get('last_name') or "") if c.get('last_name') else "")).strip()
@@ -614,7 +612,6 @@ def forward_admin_message_to_user(user_id: int, admin_msg: dict):
             lon = loc.get('longitude')
             msg = "<b>💬 Відповідь адміністратора:</b>\n"
             msg += f"<b>Локація:</b> {escape(str(lat))}, {escape(str(lon))}\n"
-            # add link to maps
             try:
                 maps = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
                 msg += f"\n<a href=\"{maps}\">Відкрити в картах</a>"
@@ -623,19 +620,17 @@ def forward_admin_message_to_user(user_id: int, admin_msg: dict):
             send_message(user_id, msg, parse_mode="HTML")
             return True
 
-        # default: text
         if caption:
             send_message(user_id, f"💬 Відповідь адміністратора:\n<pre>{escape(caption)}</pre>", parse_mode="HTML")
             return True
 
-        # fallback
         send_message(user_id, "💬 Відповідь адміністратора (без тексту).")
         return True
     except Exception as e:
         cool_error_handler(e, "forward_admin_message_to_user")
         return False
 
-# ====== НОВЫЕ функции для пакетной отправки медиа (оставлены без изменения) ======
+# ====== НОВЫЕ функции для пакетной отправки медиа ======
 
 def send_media_collection_keyboard(chat_id):
     kb = {
@@ -728,8 +723,11 @@ def send_compiled_media_to_admin(chat_id):
             cool_error_handler(e, "save_event in send_compiled_media_to_admin")
 
     media_items, doc_msgs, leftover_texts = _collect_media_summary_and_payloads(msgs)
+    # orig identifiers from the first user message
+    orig_chat_id = msgs[0]['chat']['id']
+    orig_msg_id = msgs[0].get('message_id')
     admin_info = build_admin_info(msgs[0], category=m_category)
-    reply_markup = _get_reply_markup_for_admin(chat_id)
+    reply_markup = _get_reply_markup_for_admin(orig_chat_id, orig_chat_id, orig_msg_id)
     send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
 
     try:
@@ -828,196 +826,4 @@ def format_stats_message(stats: dict) -> str:
     cat_names = [c for c in ADMIN_SUBCATEGORIES]
     max_cat_len = max(len(escape(c)) for c in cat_names) + 1
     col1 = "Категорія".ljust(max_cat_len)
-    header = f"{col1}  {'7 дн':>6}  {'30 дн':>6}"
-    lines = [header, "-" * (max_cat_len + 16)]
-    for cat in ADMIN_SUBCATEGORIES:
-        name = escape(cat)
-        week = stats.get(cat, {}).get('week', 0)
-        month = stats.get(cat, {}).get('month', 0)
-        lines.append(f"{name.ljust(max_cat_len)}  {str(week):>6}  {str(month):>6}")
-    content = "\n".join(lines)
-    return "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + content + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
-
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
-def webhook():
-    global pending_media, pending_mode
-    try:
-        data_raw = request.get_data(as_text=True)
-        update = json.loads(data_raw)
-
-        if 'callback_query' in update:
-            call = update['callback_query']
-            chat_id = call['from']['id']
-            data = call['data']
-
-            if data.startswith("reply_") and chat_id == ADMIN_ID:
-                try:
-                    user_id = int(data.split("_")[1])
-                    with GLOBAL_LOCK:
-                        waiting_for_admin[ADMIN_ID] = user_id
-                    send_message(
-                        ADMIN_ID,
-                        f"✍️ Введіть відповідь для користувача {user_id} (будь-який текст або файл):"
-                    )
-                except Exception as e:
-                    cool_error_handler(e, context="webhook: callback_query reply_")
-                    MainProtokol(str(e), 'Помилка callback reply')
-            elif data == "about":
-                send_message(
-                    chat_id,
-                    "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали"
-                )
-            elif data == "schedule":
-                send_message(
-                    chat_id,
-                    "Наш бот приймає повідомлення 24/7. Ми відповідаємо якнайшвидше."
-                )
-            elif data == "write_admin":
-                with GLOBAL_LOCK:
-                    waiting_for_admin_message.add(chat_id)
-                send_message(
-                    chat_id,
-                    "✍️ Напишіть повідомлення адміністратору (текст/фото/документ):"
-                )
-            return "ok", 200
-
-        if 'message' in update:
-            message = update['message']
-            chat_id = message['chat']['id']
-            from_id = message['from']['id']
-            text = message.get('text', '')
-
-            # ---- ПАКЕТНЫЙ РЕЖИМ СОБОРА МЕДИА/ТЕКСТА ----
-            with GLOBAL_LOCK:
-                in_pending = chat_id in pending_mode
-            if in_pending:
-                if text == "✅ Надіслати":
-                    send_compiled_media_to_admin(chat_id)
-                    send_message(chat_id, "✅ Ваші дані відправлено. Дякуємо!", reply_markup=get_reply_buttons())
-                    return "ok", 200
-                elif text == "❌ Скасувати":
-                    with GLOBAL_LOCK:
-                        pending_media.pop(chat_id, None)
-                        pending_mode.pop(chat_id, None)
-                    send_message(chat_id, "❌ Скасовано.", reply_markup=get_reply_buttons())
-                    return "ok", 200
-                else:
-                    with GLOBAL_LOCK:
-                        pending_media.setdefault(chat_id, []).append(message)
-                    send_message(chat_id, "Додано до пакету. Продовжуйте надсилати або натисніть ✅ Надіслати.", reply_markup={
-                        "keyboard": [[{"text": "✅ Надіслати"}, {"text": "❌ Скасувати"}]],
-                        "resize_keyboard": True,
-                        "one_time_keyboard": False
-                    })
-                    return "ok", 200
-
-            # Ответ администратора пользователю (теперь поддерживает медиа)
-            with GLOBAL_LOCK:
-                waiting_user = waiting_for_admin.get(ADMIN_ID)
-            if from_id == ADMIN_ID and waiting_user:
-                # полностью поддерживаем передачу фото/видео/документов/голоса/локации/контакта и текста
-                user_to_send = None
-                with GLOBAL_LOCK:
-                    user_to_send = waiting_for_admin.pop(ADMIN_ID, None)
-                success = False
-                if user_to_send:
-                    success = forward_admin_message_to_user(user_to_send, message)
-                if success:
-                    send_message(ADMIN_ID, f"✅ Повідомлення надіслано користувачу {user_to_send}.", reply_markup=get_reply_buttons())
-                else:
-                    send_message(ADMIN_ID, f"❌ Не вдалося надіслати повідомлення користувачу {user_to_send}.", reply_markup=get_reply_buttons())
-                return "ok", 200
-
-            # Главное меню
-            if text == '/start':
-                send_chat_action(chat_id, 'typing')
-                time.sleep(0.25)
-                user = message.get('from', {})
-                welcome = build_welcome_message(user)
-                send_message(
-                    chat_id,
-                    welcome,
-                    reply_markup=get_reply_buttons(),
-                    parse_mode='HTML'
-                )
-            elif text in MAIN_MENU:
-                if text == "✨ Головне":
-                    send_message(chat_id, "✨ Ви в головному меню.", reply_markup=get_reply_buttons())
-                elif text == "📢 Про нас":
-                    send_message(
-                        chat_id,
-                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали",
-                        reply_markup=get_reply_buttons()
-                    )
-                elif text == "🕰️ Графік роботи":
-                    send_message(
-                        chat_id,
-                        "Ми працюємо цілодобово. Звертайтесь у будь-який час.",
-                        reply_markup=get_reply_buttons()
-                    )
-                elif text == "📝 Повідомити про подію":
-                    desc = (
-                        "Оберіть тип події, яку хочете повідомити:\n\n"
-                        "🏗️ Техногенні: Події, пов'язані з діяльністю людини (аварії, катастрофи на виробництві/транспорті).\n\n"
-                        "🌪️ Природні: Події, спричинені силами природи (землетруси, повені, буревії).\n\n"
-                        "👥 Соціальні: Події, пов'язані з суспільними конфліктами або масовими заворушеннями.\n\n"
-                        "⚔️ Воєнні: Події, пов'язані з військовими діями або конфліктами.\n\n"
-                        "🕵️‍♂️ Розшук: Дії, спрямовані на пошук зниклих осіб або злочинців.\n\n"
-                        "📦 Інші події: Загальна категорія для всього, що не вписується в попередні визначення."
-                    )
-                    send_message(chat_id, desc, reply_markup=get_admin_subcategory_buttons())
-                elif text == "📊 Статистика подій":
-                    stats = get_stats()
-                    if stats:
-                        msg = format_stats_message(stats)
-                        send_message(chat_id, msg, parse_mode='HTML')
-                    else:
-                        send_message(chat_id, "Наразі статистика недоступна.")
-                elif text == "📣 Реклама":
-                    with GLOBAL_LOCK:
-                        pending_mode[chat_id] = "ad"
-                        pending_media[chat_id] = []
-                    send_media_collection_keyboard(chat_id)
-            elif text in ADMIN_SUBCATEGORIES:
-                with GLOBAL_LOCK:
-                    user_admin_category[chat_id] = text
-                    pending_mode[chat_id] = "event"
-                    pending_media[chat_id] = []
-                send_media_collection_keyboard(chat_id)
-            else:
-                if chat_id not in pending_mode:
-                    send_message(
-                        chat_id,
-                        "Щоб повідомити адміна або надіслати рекламу, скористайтесь відповідними кнопками в меню.",
-                        reply_markup=get_reply_buttons()
-                    )
-        return "ok", 200
-
-    except Exception as e:
-        cool_error_handler(e, context="webhook - outer")
-        MainProtokol(str(e), 'Помилка webhook')
-        return "ok", 200
-
-@app.route('/', methods=['GET'])
-def index():
-    try:
-        MainProtokol('Відвідання сайту')
-        return "Бот працює", 200
-    except Exception as e:
-        cool_error_handler(e, context="index route")
-        return "Error", 500
-
-if __name__ == "__main__":
-    try:
-        threading.Thread(target=time_debugger, daemon=True).start()
-    except Exception as e:
-        cool_error_handler(e, context="main: start time_debugger")
-    try:
-        threading.Thread(target=stats_autoclear_daemon, daemon=True).start()
-    except Exception as e:
-        cool_error_handler(e, context="main: start stats_autoclear_daemon")
-    port = int(os.getenv("PORT", 5000))
-    try:
-        app.run(host="0.0.0.0", port=port)
-    except Exception as e:
-        cool_error_handler(e, context="main: app.run")
+    header = f"{col1}  {'7 дн':>6}  {'30 дн':>6
