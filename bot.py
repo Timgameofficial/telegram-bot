@@ -392,29 +392,26 @@ def _get_reply_markup_for_admin(user_id: int):
         ]
     }
 
-# ====== Новый helper: строим расширённую карточку для админа ======
+# ====== Новый helper: строим расширённую карточку для админа (окультуренная) ======
 def build_admin_info(message: dict, category: str = None) -> str:
     """
-    Обновленная, окультуренная карточка для админа:
-    - Убираем поля: language, is_bot, тип чата (как минимум).
-    - Добавляем аккуратный профиль пользователя: имя, ссылка на профиль (если есть username) или tg://user?id=,
-      ID, признак премиума (значок), контакт/телефон (если прислан), локейшн (если прислан).
-    - Сохраняем информацию о медиа/типах и тексте, но оформляем более компактно и читабельно.
+    Окультуренная карточка для админа:
+    - Минимально: отображаем профиль (имя, ссылка/username), ID, телефон/локацию (если есть), категория (если есть),
+      Message ID и дату, а также текст (если есть).
+    - Убираем: language, is_bot, тип чата, media:..., entities, reply to и "Немає тексту".
     """
     try:
         user = message.get('from', {}) or {}
-        chat = message.get('chat', {}) or {}
         first = (user.get('first_name') or "").strip()
         last = (user.get('last_name') or "").strip()
         username = user.get('username')
         user_id = user.get('id')
         is_premium = user.get('is_premium', None)
 
-        # Display name
         display_name = (first + (" " + last if last else "")).strip() or "Без імені"
         display_html = escape(display_name)
 
-        # Profile link: prefer t.me/username if present, otherwise tg://user?id=
+        # profile link
         if username:
             profile_url = f"https://t.me/{username}"
             profile_label = f"@{escape(username)}"
@@ -424,7 +421,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
             profile_label = "Відкрити профіль"
             profile_html = f"<a href=\"{profile_url}\">{escape(profile_label)}</a>"
 
-        # Contact and location if present in the message (these are commonly present in forwarded contact/location)
+        # contact and location (if present)
         contact = message.get('contact')
         contact_html = ""
         if isinstance(contact, dict):
@@ -446,7 +443,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
             if lat is not None and lon is not None:
                 location_html = f"{lat}, {lon}"
 
-        # Message meta
+        # meta
         msg_id = message.get('message_id', '-')
         msg_date = message.get('date')
         try:
@@ -454,72 +451,42 @@ def build_admin_info(message: dict, category: str = None) -> str:
         except Exception:
             date_str = str(msg_date or '-')
 
+        # text (caption or text)
         text = message.get('text') or message.get('caption') or ''
-        entities = message.get('entities') or message.get('caption_entities') or []
-        entities_summary = ", ".join(e.get('type') for e in entities if e.get('type')) or "-"
-
-        # Media summary: list present media keys in a compact form
-        media_keys = []
-        media_candidates = ['photo', 'video', 'document', 'audio', 'voice', 'animation', 'sticker', 'contact', 'location']
-        for k in media_candidates:
-            if k in message:
-                media_keys.append(k)
-        media_summary = ", ".join(media_keys) if media_keys else "-"
-
-        # Reply information (if the message is a reply)
-        reply_info = "-"
-        if 'reply_to_message' in message and isinstance(message['reply_to_message'], dict):
-            r = message['reply_to_message']
-            rfrom = r.get('from', {})
-            rname = (rfrom.get('first_name','') or '') + ((' ' + rfrom.get('last_name')) if rfrom.get('last_name') else '')
-            reply_info = f"id:{r.get('message_id','-')} from:{escape(rname or '-')}"
-
-        # Category (если передано)
+        # category
         category_html = escape(category) if category else None
 
-        # Собираем аккуратно оформленную карточку
         parts = []
         parts.append("<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>")
         parts.append("<b>📩 Нове повідомлення</b>")
         parts.append("")
 
-        # Профиль — крупно
+        # big profile
         name_line = f"<b>{display_html}</b>"
         if is_premium:
             name_line += " ✨"
         parts.append(name_line)
-
-        # Профиль и ID
         parts.append(f"<b>Профіль:</b> {profile_html}")
         parts.append(f"<b>ID:</b> {escape(str(user_id)) if user_id is not None else '-'}")
 
-        # Контакт / Локація (если есть)
         if contact_html:
             parts.append(f"<b>Телефон:</b> {contact_html}")
         if location_html:
             parts.append(f"<b>Локація:</b> {escape(location_html)}")
 
-        # Категорія (если есть)
         if category_html:
             parts.append(f"<b>Категорія:</b> {category_html}")
 
-        # Техническая краткая секция (без лишних полей)
         parts.append("")
         parts.append(f"<b>Message ID:</b> {escape(str(msg_id))}")
         parts.append(f"<b>Дата:</b> {escape(str(date_str))}")
-        parts.append(f"<b>Медіа:</b> {escape(media_summary)}")
-        parts.append(f"<b>Entities:</b> {escape(entities_summary)}")
-        parts.append(f"<b>Reply to:</b> {escape(reply_info)}")
 
-        # Текст / Описание — моноширинный блок
-        parts.append("")
+        # show text only if present (no "Немає тексту" placeholder)
         if text:
-            # Ограничим длину отображаемого текста для аккуратности
             display_text = text if len(text) <= 2000 else text[:1997] + "..."
+            parts.append("")
             parts.append("<b>Текст / Опис:</b>")
             parts.append("<pre>{}</pre>".format(escape(display_text)))
-        else:
-            parts.append("<i>Немає тексту</i>")
 
         parts.append("")
         parts.append("<i>Повідомлення відформатовано для зручного перегляду.</i>")
@@ -533,7 +500,142 @@ def build_admin_info(message: dict, category: str = None) -> str:
         except Exception:
             return "Нове повідомлення."
 
-# ====== НОВЫЕ функции для пакетной отправки медиа ======
+# ====== Helpers to forward admin replies (теперь поддерживаем медиа) ======
+def _post_request(url, data=None, files=None, timeout=10):
+    try:
+        r = requests.post(url, data=data, files=files, timeout=timeout)
+        if not r.ok:
+            MainProtokol(f"Request failed: {url} -> {r.status_code} {r.text}", ts='WARN')
+        return r
+    except Exception as e:
+        MainProtokol(f"Network error for {url}: {str(e)}", ts='ERROR')
+        return None
+
+def forward_admin_message_to_user(user_id: int, admin_msg: dict):
+    """
+    Пересылает сообщение от админа пользователю, поддерживает:
+      - text (как форматированный ответ, текст экранируется)
+      - photo, video, animation, document, audio, voice (передается file_id)
+      - contact/location — преобразуются в текст
+    """
+    try:
+        if not user_id:
+            return False
+        # prefer caption if present, else text
+        caption = admin_msg.get('caption') or admin_msg.get('text') or ""
+        safe_caption = escape(caption) if caption else None
+
+        # Photos
+        if 'photo' in admin_msg:
+            file_id = admin_msg['photo'][-1].get('file_id')
+            url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+            payload = {"chat_id": user_id, "photo": file_id}
+            if safe_caption:
+                payload["caption"] = f"💬 Відповідь адміністратора:\n<pre>{safe_caption}</pre>"
+                payload["parse_mode"] = "HTML"
+            else:
+                payload["caption"] = "💬 Відповідь адміністратора"
+            _post_request(url, data=payload)
+            return True
+
+        if 'video' in admin_msg:
+            file_id = admin_msg['video'].get('file_id')
+            url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
+            payload = {"chat_id": user_id, "video": file_id}
+            if safe_caption:
+                payload["caption"] = f"💬 Відповідь адміністратора:\n<pre>{safe_caption}</pre>"
+                payload["parse_mode"] = "HTML"
+            else:
+                payload["caption"] = "💬 Відповідь адміністратора"
+            _post_request(url, data=payload)
+            return True
+
+        if 'animation' in admin_msg:
+            file_id = admin_msg['animation'].get('file_id')
+            url = f"https://api.telegram.org/bot{TOKEN}/sendAnimation"
+            payload = {"chat_id": user_id, "animation": file_id}
+            if safe_caption:
+                payload["caption"] = f"💬 Відповідь адміністратора:\n<pre>{safe_caption}</pre>"
+                payload["parse_mode"] = "HTML"
+            else:
+                payload["caption"] = "💬 Відповідь адміністратора"
+            _post_request(url, data=payload)
+            return True
+
+        if 'document' in admin_msg:
+            file_id = admin_msg['document'].get('file_id')
+            filename = admin_msg.get('document', {}).get('file_name', 'документ')
+            url = f"https://api.telegram.org/bot{TOKEN}/sendDocument"
+            payload = {"chat_id": user_id, "document": file_id}
+            if safe_caption:
+                payload["caption"] = f"💬 Відповідь адміністратора:\n<pre>{safe_caption}</pre>"
+                payload["parse_mode"] = "HTML"
+            else:
+                payload["caption"] = f"💬 Відповідь адміністратора — {escape(filename)}"
+            _post_request(url, data=payload)
+            return True
+
+        if 'voice' in admin_msg:
+            file_id = admin_msg['voice'].get('file_id')
+            url = f"https://api.telegram.org/bot{TOKEN}/sendVoice"
+            payload = {"chat_id": user_id, "voice": file_id}
+            if safe_caption:
+                payload["caption"] = f"💬 Відповідь адміністратора:\n<pre>{safe_caption}</pre>"
+                payload["parse_mode"] = "HTML"
+            _post_request(url, data=payload)
+            return True
+
+        if 'audio' in admin_msg:
+            file_id = admin_msg['audio'].get('file_id')
+            url = f"https://api.telegram.org/bot{TOKEN}/sendAudio"
+            payload = {"chat_id": user_id, "audio": file_id}
+            if safe_caption:
+                payload["caption"] = f"💬 Відповідь адміністратора:\n<pre>{safe_caption}</pre>"
+                payload["parse_mode"] = "HTML"
+            _post_request(url, data=payload)
+            return True
+
+        # contact / location -> textual representation
+        if 'contact' in admin_msg:
+            c = admin_msg['contact']
+            name = ((c.get('first_name') or "") + (" " + (c.get('last_name') or "") if c.get('last_name') else "")).strip()
+            phone = c.get('phone_number', '')
+            msg = "<b>💬 Відповідь адміністратора:</b>\n"
+            if name:
+                msg += f"<b>Контакт:</b> {escape(name)}\n"
+            if phone:
+                msg += f"<b>Телефон:</b> {escape(phone)}\n"
+            send_message(user_id, msg, parse_mode="HTML")
+            return True
+
+        if 'location' in admin_msg:
+            loc = admin_msg['location']
+            lat = loc.get('latitude')
+            lon = loc.get('longitude')
+            msg = "<b>💬 Відповідь адміністратора:</b>\n"
+            msg += f"<b>Локація:</b> {escape(str(lat))}, {escape(str(lon))}\n"
+            # add link to maps
+            try:
+                maps = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+                msg += f"\n<a href=\"{maps}\">Відкрити в картах</a>"
+            except Exception:
+                pass
+            send_message(user_id, msg, parse_mode="HTML")
+            return True
+
+        # default: text
+        if caption:
+            send_message(user_id, f"💬 Відповідь адміністратора:\n<pre>{escape(caption)}</pre>", parse_mode="HTML")
+            return True
+
+        # fallback
+        send_message(user_id, "💬 Відповідь адміністратора (без тексту).")
+        return True
+    except Exception as e:
+        cool_error_handler(e, "forward_admin_message_to_user")
+        return False
+
+# ====== НОВЫЕ функции для пакетной отправки медиа (оставлены без изменения) ======
 
 def send_media_collection_keyboard(chat_id):
     kb = {
@@ -551,27 +653,16 @@ def send_media_collection_keyboard(chat_id):
     )
 
 def _collect_media_summary_and_payloads(msgs):
-    """
-    Принцип:
-      - Собрать все media items (photo, video, animation) для отправки через sendMediaGroup (если >=2) или sendPhoto/sendVideo (если 1).
-      - Документы собираются в список doc_msgs, будут отправляться по одному.
-      - Тексты: если присутствует медиа, объединить тексты и использовать как caption (на первом элементе),
-        если caption слишком длинный или нет медиа — отправить как отдельное сообщение.
-    Возвращает: media_items(list), doc_msgs(list), leftover_texts(list)
-    """
-    media_items = []  # для sendMediaGroup: каждый элемент dict с type, media, caption (caption только на первом)
+    media_items = []
     doc_msgs = []
     leftover_texts = []
 
-    # Собираем тексты/капы отдельно, чтобы потом объединить
     captions_for_media = []
     other_texts = []
 
     for m in msgs:
-        # text in message (standalone text)
         txt = m.get('text') or m.get('caption') or ''
         if 'photo' in m:
-            # выбираем последний размер фото
             try:
                 file_id = m['photo'][-1]['file_id']
             except Exception:
@@ -593,50 +684,39 @@ def _collect_media_summary_and_payloads(msgs):
                 if txt:
                     captions_for_media.append(txt)
         elif 'document' in m:
-            # Документы будем отправлять отдельно. У документа может быть caption/text.
             doc_msgs.append({"file_id": m['document'].get('file_id'), "file_name": m['document'].get('file_name'), "text": txt})
-            if txt:
-                # считам текст использованным как подпись документа — не добавляем в other_texts
-                pass
         else:
-            # остальные виды (sticker, voice, contact, location, plain text)
             if txt:
                 other_texts.append(txt)
             else:
-                # если нет текста и нет известных файлов — добавляем краткое описание
                 t = []
                 for k in ['sticker', 'voice', 'contact', 'location', 'audio']:
                     if k in m:
                         t.append(k)
                 if t:
                     other_texts.append(f"[contains: {','.join(t)}]")
-    # Сформируем combined caption для media (если есть)
+
     combined_caption = None
     if media_items:
         if captions_for_media:
-            # объединяем, разделяем двойным переносом, но нужно учитывать ограничение caption (1024 символа)
             joined = "\n\n".join(captions_for_media)
             if len(joined) > 1000:
                 joined = joined[:997] + "..."
             combined_caption = joined
-        # При необходимости установить caption в первый элемент media_items
         for idx, mi in enumerate(media_items):
             if idx == 0 and combined_caption:
                 mi['caption'] = combined_caption
             else:
                 mi['caption'] = ""
-    # leftover_texts — тексты, не использованные как caption (other_texts)
     leftover_texts = other_texts
     return media_items, doc_msgs, leftover_texts
 
 def send_compiled_media_to_admin(chat_id):
-    # Берём копию под блокировкой, затем обрабатываем её
     with GLOBAL_LOCK:
         msgs = list(pending_media.get(chat_id, []))
     if not msgs:
         send_message(chat_id, "Немає медіа для надсилання.")
         return
-    # Определяем категорию и сохраняем событие при необходимости
     m_category = None
     with GLOBAL_LOCK:
         if pending_mode.get(chat_id) == "event":
@@ -647,26 +727,17 @@ def send_compiled_media_to_admin(chat_id):
         except Exception as e:
             cool_error_handler(e, "save_event in send_compiled_media_to_admin")
 
-    # Собираем payloads
     media_items, doc_msgs, leftover_texts = _collect_media_summary_and_payloads(msgs)
-
-    # Формируем admin_info из первого сообщения для контекста (как раньше)
     admin_info = build_admin_info(msgs[0], category=m_category)
-
     reply_markup = _get_reply_markup_for_admin(chat_id)
-    # --- Отправляем админ-инфо сначала ---
     send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
 
-    # --- Отправляем media (photo/video/animation) ---
     try:
         if media_items:
-            # Если больше одного — используем sendMediaGroup
             if len(media_items) > 1:
-                # Подготовим список объектов InputMedia для sendMediaGroup
                 sendmedia = []
                 for mi in media_items:
                     obj = {"type": mi["type"], "media": mi["media"]}
-                    # caption только для первого элемента (Telegram разрешает caption для каждого, но обычно отображается для первого)
                     if mi.get("caption"):
                         obj["caption"] = mi["caption"]
                         obj["parse_mode"] = "HTML"
@@ -680,7 +751,6 @@ def send_compiled_media_to_admin(chat_id):
                 except Exception as e:
                     MainProtokol(f"sendMediaGroup error: {str(e)}", "MediaGroupFail")
             else:
-                # Один элемент — отправляем через соответствующий метод, чтобы корректно передать caption
                 mi = media_items[0]
                 if mi["type"] == "photo":
                     url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
@@ -721,7 +791,6 @@ def send_compiled_media_to_admin(chat_id):
     except Exception as e:
         cool_error_handler(e, "send_compiled_media_to_admin: media send")
 
-    # --- Отправляем документы по одному ---
     for d in doc_msgs:
         try:
             payload = {
@@ -737,16 +806,13 @@ def send_compiled_media_to_admin(chat_id):
         except Exception as e:
             MainProtokol(f"sendDocument error: {str(e)}", "DocumentFail")
 
-    # --- Отправляем оставшиеся тексты (если есть) ---
     if leftover_texts:
         try:
             combined = "\n\n".join(leftover_texts)
-            # Разрешим большой текст, но при необходимости можно разбить на части
             send_message(ADMIN_ID, f"<b>Текст від користувача:</b>\n<pre>{escape(combined)}</pre>", parse_mode="HTML")
         except Exception as e:
             MainProtokol(f"text send error: {str(e)}", "TextFail")
 
-    # Очищаем pending
     with GLOBAL_LOCK:
         pending_media.pop(chat_id, None)
         pending_mode.pop(chat_id, None)
@@ -791,7 +857,7 @@ def webhook():
                         waiting_for_admin[ADMIN_ID] = user_id
                     send_message(
                         ADMIN_ID,
-                        f"✍️ Введіть відповідь для користувача {user_id}:"
+                        f"✍️ Введіть відповідь для користувача {user_id} (будь-який текст або файл):"
                     )
                 except Exception as e:
                     cool_error_handler(e, context="webhook: callback_query reply_")
@@ -825,7 +891,6 @@ def webhook():
             with GLOBAL_LOCK:
                 in_pending = chat_id in pending_mode
             if in_pending:
-                # Обрабатываем команды подтверждения/отмены
                 if text == "✅ Надіслати":
                     send_compiled_media_to_admin(chat_id)
                     send_message(chat_id, "✅ Ваші дані відправлено. Дякуємо!", reply_markup=get_reply_buttons())
@@ -839,7 +904,6 @@ def webhook():
                 else:
                     with GLOBAL_LOCK:
                         pending_media.setdefault(chat_id, []).append(message)
-                    # Подтверждаем приём отдельного файла/сообщения
                     send_message(chat_id, "Додано до пакету. Продовжуйте надсилати або натисніть ✅ Надіслати.", reply_markup={
                         "keyboard": [[{"text": "✅ Надіслати"}, {"text": "❌ Скасувати"}]],
                         "resize_keyboard": True,
@@ -847,15 +911,21 @@ def webhook():
                     })
                     return "ok", 200
 
-            # Ответ администратора пользователю
+            # Ответ администратора пользователю (теперь поддерживает медиа)
             with GLOBAL_LOCK:
                 waiting_user = waiting_for_admin.get(ADMIN_ID)
             if from_id == ADMIN_ID and waiting_user:
+                # полностью поддерживаем передачу фото/видео/документов/голоса/локации/контакта и текста
+                user_to_send = None
                 with GLOBAL_LOCK:
-                    user_id = waiting_for_admin.pop(ADMIN_ID, None)
-                if user_id:
-                    send_message(user_id, f"💬 Відповідь адміністратора:\n{text}")
-                    send_message(ADMIN_ID, f"✅ Відповідь надіслано користувачу {user_id}")
+                    user_to_send = waiting_for_admin.pop(ADMIN_ID, None)
+                success = False
+                if user_to_send:
+                    success = forward_admin_message_to_user(user_to_send, message)
+                if success:
+                    send_message(ADMIN_ID, f"✅ Повідомлення надіслано користувачу {user_to_send}.", reply_markup=get_reply_buttons())
+                else:
+                    send_message(ADMIN_ID, f"❌ Не вдалося надіслати повідомлення користувачу {user_to_send}.", reply_markup=get_reply_buttons())
                 return "ok", 200
 
             # Главное меню
