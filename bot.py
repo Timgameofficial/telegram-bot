@@ -1,4 +1,3 @@
-# contents: расширение информации, отправляемой админу — больше полей и аккуратное HTML-оформление
 import os
 import time
 import json
@@ -6,11 +5,8 @@ import requests
 import threading
 import traceback
 import datetime
-import textwrap
 from flask import Flask, request
 from html import escape
-from pathlib import Path
-
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import ArgumentError
@@ -234,7 +230,6 @@ def get_stats():
         now = datetime.datetime.utcnow()
         week_threshold = now - datetime.timedelta(days=7)
         month_threshold = now - datetime.timedelta(days=30)
-
         with engine.connect() as conn:
             if engine.dialect.name == "sqlite":
                 week_ts = week_threshold.isoformat()
@@ -248,7 +243,6 @@ def get_stats():
                 q_month = text("SELECT category, COUNT(*) as cnt FROM events WHERE dt >= :month GROUP BY category")
                 wk = conn.execute(q_week, {"week": week_threshold}).all()
                 mo = conn.execute(q_month, {"month": month_threshold}).all()
-
             for row in wk:
                 cat = row[0]
                 cnt = int(row[1])
@@ -352,59 +346,65 @@ def send_media_group(chat_id, media_group, reply_markup=None):
         cool_error_handler(e, context="send_media_group")
         MainProtokol(str(e), 'Помилка мережі media group')
 
-def send_admin_media_reply(user_id, message):
-    # Поддержка reply фото/видео/документов от админа пользователю
-    media_types = [
-        ('photo', 'sendPhoto', 'photo'),
-        ('video', 'sendVideo', 'video'),
-        ('document', 'sendDocument', 'document'),
-        ('audio', 'sendAudio', 'audio'),
-        ('voice', 'sendVoice', 'voice'),
-        ('animation', 'sendAnimation', 'animation'),
-        ('sticker', 'sendSticker', 'sticker')
-    ]
-    for key, endpoint, payload_key in media_types:
-        if key in message:
-            if key == 'photo':
-                photos = message[key]
-                if isinstance(photos, list) and len(photos) > 1:
-                    # Отправить альбом
-                    media_group = []
-                    for idx, ph in enumerate(photos):
-                        file_id = ph.get('file_id')
-                        obj = {'type': 'photo', 'media': file_id}
-                        if idx == 0 and ('caption' in message or 'text' in message):
-                            obj['caption'] = message.get('caption', message.get('text', ''))
-                        media_group.append(obj)
-                    send_media_group(user_id, media_group)
-                    return True
-                else:
-                    file_id = photos[-1]['file_id']
-                    url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
-                    payload = {
-                        'chat_id': user_id,
-                        payload_key: file_id
-                    }
-                    if 'caption' in message:
-                        payload['caption'] = message['caption']
-                    elif 'text' in message:
-                        payload['caption'] = message['text']
-                    requests.post(url, data=payload)
-                    return True
-            else:
-                file_id = message[key]['file_id'] if isinstance(message[key], dict) else message[key].get('file_id')
-                url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
-                payload = {
-                    'chat_id': user_id,
-                    payload_key: file_id
-                }
-                if 'caption' in message:
-                    payload['caption'] = message['caption']
-                elif 'text' in message:
-                    payload['caption'] = message['text']
-                requests.post(url, data=payload)
-                return True
-    return False
+def extract_media_groups(message):
+    groups = []
+    for t in ['photo', 'video']:
+        items = message.get(t)
+        if items and isinstance(items, list) and len(items) > 1:
+            media_group = []
+            caption_sent = False
+            for idx, item in enumerate(items):
+                file_id = item.get('file_id')
+                obj = {'type': t, 'media': file_id}
+                if not caption_sent and idx == 0 and ('caption' in message or 'text' in message):
+                    obj['caption'] = message.get('caption', message.get('text', ''))
+                    obj['parse_mode'] = 'HTML'
+                    caption_sent = True
+                media_group.append(obj)
+            groups.append((t, media_group))
+    return groups
+
+def extract_documents(message):
+    docs = []
+    if "document" in message:
+        doc = message["document"]
+        if isinstance(doc, list):
+            docs = doc
+        else:
+            docs.append(doc)
+    return docs
+
+def forward_documents_to_admin(message, admin_id, reply_markup=None):
+    docs = extract_documents(message)
+    caption_sent = False
+    for doc in docs:
+        payload = {
+            'chat_id': admin_id,
+            'document': doc.get('file_id')
+        }
+        if not caption_sent:
+            if 'caption' in message:
+                payload['caption'] = message['caption']
+            caption_sent = True
+        if reply_markup:
+            payload['reply_markup'] = json.dumps(reply_markup)
+        requests.post(f'https://api.telegram.org/bot{TOKEN}/sendDocument', data=payload)
+    return bool(docs)
+
+def forward_documents_to_user(user_id, message):
+    docs = extract_documents(message)
+    caption_sent = False
+    for doc in docs:
+        payload = {
+            'chat_id': user_id,
+            'document': doc.get('file_id')
+        }
+        if not caption_sent:
+            if 'caption' in message:
+                payload['caption'] = message['caption']
+            caption_sent = True
+        requests.post(f'https://api.telegram.org/bot{TOKEN}/sendDocument', data=payload)
+    return bool(docs)
 
 def _get_reply_markup_for_admin(user_id: int):
     return {
@@ -421,11 +421,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
         last = user.get('last_name', '') or ""
         username = user.get('username')
         user_id = user.get('id')
-        # lang = user.get('language_code', '-')
-        # is_bot = user.get('is_bot', False)
         is_premium = user.get('is_premium', False) if isinstance(user.get('is_premium', None), bool) else user.get('is_premium', None)
-
-        # chat_type = chat.get('type', '-')
         chat_title = chat.get('title') or ''
         msg_id = message.get('message_id')
         msg_date = message.get('date')
@@ -433,7 +429,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
             date_str = datetime.datetime.utcfromtimestamp(int(msg_date)).strftime('%Y-%m-%d %H:%M:%S UTC') if msg_date else '-'
         except Exception:
             date_str = str(msg_date or '-')
-
         text = message.get('text') or message.get('caption') or ''
         entities = message.get('entities') or message.get('caption_entities') or []
         entities_summary = []
@@ -442,7 +437,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
             if etype:
                 entities_summary.append(etype)
         entities_summary = ", ".join(entities_summary) if entities_summary else "-"
-
         media_keys = []
         media_details = []
         media_candidates = [
@@ -472,9 +466,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
                             media_details.append(f"{k}")
                 except Exception:
                     media_details.append(k)
-
         media_summary = ", ".join(media_keys) if media_keys else "-"
-
         reply_info = "-"
         if 'reply_to_message' in message and isinstance(message['reply_to_message'], dict):
             r = message['reply_to_message']
@@ -497,7 +489,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
             parts.append(f"<b>Username:</b> @{escape(username)}")
         if is_premium is not None:
             parts.append(f"<b>Is premium:</b> {escape(str(is_premium))}")
-        # Удалены строки: Мова, Is bot, Тип чату
         parts += [
             f"<b>Message ID:</b> {escape(str(msg_id))}",
             f"<b>Дата:</b> {escape(str(date_str))}",
@@ -518,25 +509,6 @@ def build_admin_info(message: dict, category: str = None) -> str:
         except Exception:
             return "Нове повідомлення."
 
-def extract_media_group_from_message(message):
-    # Извлекает все фото или все видео (альбом) для передачи sendMediaGroup
-    types = ['photo', 'video']
-    for t in types:
-        if t in message and isinstance(message[t], list) and len(message[t]) > 1:
-            media_group = []
-            caption_sent = False
-            for idx, item in enumerate(message[t]):
-                file_id = item.get('file_id')
-                obj = {'type': t, 'media': file_id}
-                # Caption только для первого
-                if not caption_sent and ('caption' in message or 'text' in message):
-                    obj['caption'] = message.get('caption', message.get('text', ''))
-                    obj['parse_mode'] = 'HTML'
-                    caption_sent = True
-                media_group.append(obj)
-            return t, media_group
-    return None, None
-
 def forward_user_message_to_admin(message):
     try:
         if not ADMIN_ID or ADMIN_ID == 0:
@@ -546,70 +518,65 @@ def forward_user_message_to_admin(message):
         user_chat_id = message['chat']['id']
         msg_id = message.get('message_id')
         category = user_admin_category.get(user_chat_id, 'Без категорії')
-
         admin_info = build_admin_info(message, category=category)
-
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
+
         if category in ADMIN_SUBCATEGORIES:
             save_event(category)
 
-        # Пересылка альбома медиа (если несколько файлов одного типа)
-        media_type, media_group = extract_media_group_from_message(message)
-        if media_group:
-            resp = send_media_group(ADMIN_ID, media_group, reply_markup=reply_markup)
+        media_groups = extract_media_groups(message)
+        sent_any_album = False
+        for t, mg in media_groups:
+            send_media_group(ADMIN_ID, mg, reply_markup=reply_markup)
+            sent_any_album = True
+
+        docs_forwarded = forward_documents_to_admin(message, ADMIN_ID, reply_markup=reply_markup)
+
+        if sent_any_album or docs_forwarded:
             send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
             send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
             return
 
-        # пытаемся переслать оригинал; но даже если не получится, отправим расширённую карточку
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
             fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': msg_id}
-            fwd_resp = requests.post(fwd_url, data=fwd_payload, timeout=5)
+            requests.post(fwd_url, data=fwd_payload, timeout=5)
             send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
             send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
             return
         except Exception as e:
             MainProtokol(f"forwardMessage failed (user): {str(e)}", "ForwardFail")
 
-        media_sent = False
-        try:
-            media_types = [
-                ('photo', 'sendPhoto', 'photo'),
-                ('video', 'sendVideo', 'video'),
-                ('document', 'sendDocument', 'document'),
-                ('audio', 'sendAudio', 'audio'),
-                ('voice', 'sendVoice', 'voice'),
-                ('animation', 'sendAnimation', 'animation'),
-                ('sticker', 'sendSticker', 'sticker')
-            ]
-            for key, endpoint, payload_key in media_types:
-                if key in message:
-                    if key == 'photo':
-                        file_id = message[key][-1]['file_id']
-                    else:
-                        file_id = message[key]['file_id'] if isinstance(message[key], dict) else message[key].get('file_id')
-                    url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
-                    payload = {
-                        'chat_id': ADMIN_ID,
-                        payload_key: file_id,
-                        'caption': admin_info,
-                        'reply_markup': json.dumps(reply_markup),
-                        'parse_mode': 'HTML'
-                    }
-                    resp = requests.post(url, data=payload)
-                    media_sent = resp.ok
-                    if not media_sent:
-                        MainProtokol(f'{endpoint} failed: {resp.text}', "MediaSendFail")
-                    break
-            if not media_sent:
-                send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
-            send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
-        except Exception as e:
-            cool_error_handler(e, context="forward_user_message_to_admin: sendMedia")
-            MainProtokol(str(e), "SendMediaException")
-            send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
-            send_message(user_chat_id, "⚠️ Виникла помилка при пересиланні медіа, адміністратору надіслано текст повідомлення.")
+        media_types = [
+            ('photo', 'sendPhoto', 'photo'),
+            ('video', 'sendVideo', 'video'),
+            ('document', 'sendDocument', 'document'),
+            ('audio', 'sendAudio', 'audio'),
+            ('voice', 'sendVoice', 'voice'),
+            ('animation', 'sendAnimation', 'animation'),
+            ('sticker', 'sendSticker', 'sticker')
+        ]
+        for key, endpoint, payload_key in media_types:
+            if key in message:
+                file_id = None
+                if key == 'photo':
+                    file_id = message[key][-1]['file_id']
+                elif key == 'video':
+                    file_id = message[key][-1]['file_id'] if isinstance(message[key], list) else message[key].get('file_id')
+                else:
+                    file_id = message[key]['file_id'] if isinstance(message[key], dict) else message[key].get('file_id')
+                url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
+                payload = {
+                    'chat_id': ADMIN_ID,
+                    payload_key: file_id,
+                    'caption': admin_info,
+                    'reply_markup': json.dumps(reply_markup),
+                    'parse_mode': 'HTML'
+                }
+                resp = requests.post(url, data=payload)
+                break
+        send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
+        send_message(user_chat_id, "✅ Дякуємо! Ваше повідомлення надіслано адміністратору.")
     except Exception as e:
         cool_error_handler(e, context="forward_user_message_to_admin: unhandled")
         MainProtokol(str(e), "ForwardUnhandledException")
@@ -627,21 +594,23 @@ def forward_ad_to_admin(message):
         user_chat_id = message['chat']['id']
         category = None
         admin_info = build_admin_info(message, category=category)
-
         reply_markup = _get_reply_markup_for_admin(user_chat_id)
 
-        if ADMIN_ID and ADMIN_ID != 0:
-            send_chat_action(ADMIN_ID, 'typing')
-            time.sleep(0.25)
+        send_chat_action(ADMIN_ID, 'typing')
+        time.sleep(0.25)
 
-        # Проверяем альбом для рекламы
-        media_type, media_group = extract_media_group_from_message(message)
-        if media_group:
-            send_media_group(ADMIN_ID, media_group, reply_markup=reply_markup)
+        media_groups = extract_media_groups(message)
+        sent_any_album = False
+        for t, mg in media_groups:
+            send_media_group(ADMIN_ID, mg, reply_markup=reply_markup)
+            sent_any_album = True
+
+        docs_forwarded = forward_documents_to_admin(message, ADMIN_ID, reply_markup=reply_markup)
+
+        if sent_any_album or docs_forwarded:
             send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode='HTML')
             send_message(user_chat_id, "✅ Дякуємо! Ваша заявка надіслана.")
             return
-
         try:
             fwd_url = f'https://api.telegram.org/bot{TOKEN}/forwardMessage'
             fwd_payload = {'chat_id': ADMIN_ID, 'from_chat_id': user_chat_id, 'message_id': message.get('message_id')}
@@ -659,6 +628,47 @@ def forward_ad_to_admin(message):
             send_message(message['chat']['id'], "⚠️ Виникла помилка при надсиланні рекламного запиту. Спробуйте ще раз.")
         except Exception as err:
             cool_error_handler(err, context="forward_ad_to_admin: notify user")
+
+def send_admin_media_reply(user_id, message):
+    # альбомы фото/видео
+    media_groups = extract_media_groups(message)
+    for t, mg in media_groups:
+        send_media_group(user_id, mg)
+        return True
+    # групповые документы (будут просто по одному — Telegram API не позволяет иначе)
+    docs_forwarded = forward_documents_to_user(user_id, message)
+    if docs_forwarded:
+        return True
+    media_types = [
+        ('photo', 'sendPhoto', 'photo'),
+        ('video', 'sendVideo', 'video'),
+        ('document', 'sendDocument', 'document'),
+        ('audio', 'sendAudio', 'audio'),
+        ('voice', 'sendVoice', 'voice'),
+        ('animation', 'sendAnimation', 'animation'),
+        ('sticker', 'sendSticker', 'sticker')
+    ]
+    for key, endpoint, payload_key in media_types:
+        if key in message:
+            file_id = None
+            if key == 'photo':
+                file_id = message[key][-1]['file_id']
+            elif key == 'video':
+                file_id = message[key][-1]['file_id'] if isinstance(message[key], list) else message[key].get('file_id')
+            else:
+                file_id = message[key]['file_id'] if isinstance(message[key], dict) else message[key].get('file_id')
+            url = f'https://api.telegram.org/bot{TOKEN}/{endpoint}'
+            payload = {
+                'chat_id': user_id,
+                payload_key: file_id
+            }
+            if 'caption' in message:
+                payload['caption'] = message['caption']
+            elif 'text' in message:
+                payload['caption'] = message['text']
+            requests.post(url, data=payload)
+            return True
+    return False
 
 waiting_for_admin = {}
 
@@ -688,7 +698,6 @@ def webhook():
     try:
         data_raw = request.get_data(as_text=True)
         update = json.loads(data_raw)
-
         if 'callback_query' in update:
             call = update['callback_query']
             chat_id = call['from']['id']
@@ -730,7 +739,7 @@ def webhook():
             text = message.get('text', '')
             first_name = message['from'].get('first_name', 'Без імені')
 
-            # Ответ администратора пользователю (добавлена поддержка медиа)
+            # Ответ администратора пользователю (поддержка медиа, документов, альбомов)
             if from_id == ADMIN_ID and ADMIN_ID in waiting_for_admin:
                 user_id = waiting_for_admin.pop(ADMIN_ID)
                 if not send_admin_media_reply(user_id, message):
