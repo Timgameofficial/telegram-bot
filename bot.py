@@ -726,8 +726,9 @@ def send_compiled_media_to_admin(chat_id):
     # orig identifiers from the first user message
     orig_chat_id = msgs[0]['chat']['id']
     orig_msg_id = msgs[0].get('message_id')
+    orig_user_id = msgs[0].get('from', {}).get('id')
     admin_info = build_admin_info(msgs[0], category=m_category)
-    reply_markup = _get_reply_markup_for_admin(orig_chat_id, orig_chat_id, orig_msg_id)
+    reply_markup = _get_reply_markup_for_admin(orig_user_id, orig_chat_id, orig_msg_id)
     send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
 
     try:
@@ -826,4 +827,313 @@ def format_stats_message(stats: dict) -> str:
     cat_names = [c for c in ADMIN_SUBCATEGORIES]
     max_cat_len = max(len(escape(c)) for c in cat_names) + 1
     col1 = "Категорія".ljust(max_cat_len)
-    header = f"{col1}  {'7 дн':>6}  {'30 дн':>6
+    header = f"{col1}  {'7 дн':>6}  {'30 дн':>6}"
+    lines = [header, "-" * (max_cat_len + 16)]
+    for cat in ADMIN_SUBCATEGORIES:
+        name = escape(cat)
+        week = stats.get(cat, {}).get('week', 0)
+        month = stats.get(cat, {}).get('month', 0)
+        lines.append(f"{name.ljust(max_cat_len)}  {str(week):>6}  {str(month):>6}")
+    content = "\n".join(lines)
+    return "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + content + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
+
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+def webhook():
+    global pending_media, pending_mode, admin_adding_event
+    try:
+        data_raw = request.get_data(as_text=True)
+        update = json.loads(data_raw)
+
+        # CALLBACK HANDLING
+        if 'callback_query' in update:
+            call = update['callback_query']
+            chat_id = call['from']['id']
+            data = call.get('data', '')
+
+            # Ответ админу на сообщение пользователя (существующий функционал)
+            if data.startswith("reply_") and chat_id == ADMIN_ID:
+                try:
+                    user_id = int(data.split("_", 1)[1])
+                    with GLOBAL_LOCK:
+                        waiting_for_admin[ADMIN_ID] = user_id
+                    send_message(
+                        ADMIN_ID,
+                        f"✍️ Введіть відповідь для користувача {user_id} (будь-який текст або файл):"
+                    )
+                except Exception as e:
+                    cool_error_handler(e, context="webhook: callback_query reply_")
+                    MainProtokol(str(e), 'Помилка callback reply')
+
+            # НОВОЕ: админ нажал "додати до статистики" — открываем выбор категории
+            elif data.startswith("addstat_") and chat_id == ADMIN_ID:
+                try:
+                    parts = data.split("_", 2)
+                    if len(parts) == 3:
+                        orig_chat_id = int(parts[1])
+                        orig_msg_id = int(parts[2])
+                        kb = {"inline_keyboard": []}
+                        row = []
+                        for idx, cat in enumerate(ADMIN_SUBCATEGORIES):
+                            row.append({"text": cat, "callback_data": f"confirm_addstat|{orig_chat_id}|{orig_msg_id}|{idx}"})
+                            if len(row) == 2:
+                                kb["inline_keyboard"].append(row)
+                                row = []
+                        if row:
+                            kb["inline_keyboard"].append(row)
+                        send_message(ADMIN_ID, "Оберіть категорію для додавання до статистики:", reply_markup=kb)
+                    else:
+                        send_message(ADMIN_ID, "Невірний формат callback для додавання в статистику.")
+                except Exception as e:
+                    cool_error_handler(e, context="webhook: addstat callback")
+                    MainProtokol(str(e), 'addstat_callback_err')
+
+            # НОВОЕ: админ выбрал категорию — подтверждаем и сохраняем
+            elif data.startswith("confirm_addstat|") and chat_id == ADMIN_ID:
+                try:
+                    parts = data.split("|")
+                    if len(parts) == 4:
+                        orig_chat_id = int(parts[1])
+                        orig_msg_id = int(parts[2])
+                        cat_idx = int(parts[3])
+                        if 0 <= cat_idx < len(ADMIN_SUBCATEGORIES):
+                            category = ADMIN_SUBCATEGORIES[cat_idx]
+                            save_event(category)
+                            send_message(ADMIN_ID, f"✅ Повідомлення додано до статистики як: <b>{escape(category)}</b>", parse_mode="HTML", reply_markup=get_reply_buttons())
+                            if NOTIFY_USER_ON_ADD_STAT:
+                                try:
+                                    send_message(orig_chat_id, f"ℹ️ Ваше повідомлення було додано до статистики як: <b>{escape(category)}</b>", parse_mode="HTML")
+                                except Exception as e:
+                                    MainProtokol(str(e), 'notify_user_add_stat_err')
+                        else:
+                            send_message(ADMIN_ID, "Невірний індекс категорії.")
+                    else:
+                        send_message(ADMIN_ID, "Невірний формат callback confirm_addstat.")
+                except Exception as e:
+                    cool_error_handler(e, context="webhook: confirm_addstat callback")
+                    MainProtokol(str(e), 'confirm_addstat_callback_err')
+
+            else:
+                # другие callback'ы
+                if data == "about":
+                    send_message(
+                        chat_id,
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали"
+                    )
+                elif data == "schedule":
+                    send_message(
+                        chat_id,
+                        "Наш бот приймає повідомлення 24/7. Ми відповідаємо якнайшвидше."
+                    )
+                elif data == "write_admin":
+                    with GLOBAL_LOCK:
+                        waiting_for_admin_message.add(chat_id)
+                    send_message(
+                        chat_id,
+                        "✍️ Напишіть повідомлення адміністратору (текст/фото/документ):"
+                    )
+            return "ok", 200
+
+        # MESSAGE HANDLING
+        if 'message' in update:
+            message = update['message']
+            chat_id = message['chat']['id']
+            from_id = message['from']['id']
+            text = message.get('text', '')
+
+            # ---- ПАКЕТНЫЙ РЕЖИМ СОБОРА МЕДИА/ТЕКСТА ----
+            with GLOBAL_LOCK:
+                in_pending = chat_id in pending_mode
+            if in_pending:
+                if text == "✅ Надіслати":
+                    send_compiled_media_to_admin(chat_id)
+                    send_message(chat_id, "✅ Ваші дані відправлено. Дякуємо!", reply_markup=get_reply_buttons())
+                    return "ok", 200
+                elif text == "❌ Скасувати":
+                    with GLOBAL_LOCK:
+                        pending_media.pop(chat_id, None)
+                        pending_mode.pop(chat_id, None)
+                    send_message(chat_id, "❌ Скасовано.", reply_markup=get_reply_buttons())
+                    return "ok", 200
+                else:
+                    with GLOBAL_LOCK:
+                        pending_media.setdefault(chat_id, []).append(message)
+                    send_message(chat_id, "Додано до пакету. Продовжуйте надсилати або натисніть ✅ Надіслати.", reply_markup={
+                        "keyboard": [[{"text": "✅ Надіслати"}, {"text": "❌ Скасувати"}]],
+                        "resize_keyboard": True,
+                        "one_time_keyboard": False
+                    })
+                    return "ok", 200
+
+            # ---- НОВОЕ: если админ сейчас в режиме добавления события, собираем его сообщения ----
+            with GLOBAL_LOCK:
+                admin_flow = admin_adding_event.get(from_id)
+            if admin_flow:
+                if text == "✅ Підтвердити":
+                    with GLOBAL_LOCK:
+                        flow = admin_adding_event.pop(from_id, None)
+                    if flow:
+                        category = flow.get("category")
+                        msgs = flow.get("messages", [])
+                        try:
+                            save_event(category)
+                        except Exception as e:
+                            cool_error_handler(e, "save_event (admin add)")
+                            send_message(ADMIN_ID, "❌ Помилка при збереженні події в БД.")
+                            return "ok", 200
+                        media_items, doc_msgs, leftover_texts = _collect_media_summary_and_payloads(msgs)
+                        cnt_photos = sum(1 for m in media_items if m["type"] == "photo")
+                        cnt_videos = sum(1 for m in media_items if m["type"] == "video")
+                        cnt_animations = sum(1 for m in media_items if m["type"] == "animation")
+                        cnt_docs = len(doc_msgs)
+                        cnt_texts = len(leftover_texts)
+                        summary_lines = [
+                            "<b>✅ Подія додана</b>",
+                            f"<b>Категорія:</b> {escape(str(category))}",
+                            f"<b>Фото:</b> {cnt_photos}",
+                            f"<b>Відео:</b> {cnt_videos}",
+                            f"<b>Анімації:</b> {cnt_animations}",
+                            f"<b>Документи:</b> {cnt_docs}",
+                            f"<b>Тексти:</b> {cnt_texts}",
+                        ]
+                        send_message(ADMIN_ID, "\n".join(summary_lines), parse_mode="HTML", reply_markup=get_reply_buttons())
+                        return "ok", 200
+                    else:
+                        send_message(ADMIN_ID, "Нема активного флоу додавання події.")
+                        return "ok", 200
+                elif text == "❌ Відмінити":
+                    with GLOBAL_LOCK:
+                        admin_adding_event.pop(from_id, None)
+                    send_message(ADMIN_ID, "❌ Додавання події скасовано.", reply_markup=get_reply_buttons())
+                    return "ok", 200
+                else:
+                    with GLOBAL_LOCK:
+                        admin_adding_event.setdefault(from_id, {"category": admin_flow["category"], "messages": []})
+                        admin_adding_event[from_id]["messages"].append(message)
+                    send_message(ADMIN_ID, "Додано до події. Продовжуйте надсилати матеріали або натисніть ✅ Підтвердити / ❌ Відмінити.")
+                    return "ok", 200
+
+            # Ответ администратора пользователю (теперь поддерживает медиа)
+            with GLOBAL_LOCK:
+                waiting_user = waiting_for_admin.get(ADMIN_ID)
+            if from_id == ADMIN_ID and waiting_user:
+                user_to_send = None
+                with GLOBAL_LOCK:
+                    user_to_send = waiting_for_admin.pop(ADMIN_ID, None)
+                success = False
+                if user_to_send:
+                    success = forward_admin_message_to_user(user_to_send, message)
+                if success:
+                    send_message(ADMIN_ID, f"✅ Повідомлення надіслано користувачу {user_to_send}.", reply_markup=get_reply_buttons())
+                else:
+                    send_message(ADMIN_ID, f"❌ Не вдалося надіслати повідомлення користувачу {user_to_send}.", reply_markup=get_reply_buttons())
+                return "ok", 200
+
+            # Главное меню и команда /add_event (для админа)
+            if text == '/start':
+                send_chat_action(chat_id, 'typing')
+                time.sleep(0.25)
+                user = message.get('from', {})
+                welcome = build_welcome_message(user)
+                send_message(
+                    chat_id,
+                    welcome,
+                    reply_markup=get_reply_buttons(),
+                    parse_mode='HTML'
+                )
+            elif text == '/add_event' and from_id == ADMIN_ID:
+                kb = {"inline_keyboard": []}
+                row = []
+                for idx, cat in enumerate(ADMIN_SUBCATEGORIES):
+                    row.append({"text": cat, "callback_data": f"admin_add_event|{idx}"})
+                    if len(row) == 2:
+                        kb["inline_keyboard"].append(row)
+                        row = []
+                if row:
+                    kb["inline_keyboard"].append(row)
+                send_message(ADMIN_ID, "Оберіть категорію для нової події:", reply_markup=kb)
+            elif text in MAIN_MENU:
+                if text == "✨ Головне":
+                    send_message(chat_id, "✨ Ви в головному меню.", reply_markup=get_reply_buttons())
+                elif text == "📢 Про нас":
+                    send_message(
+                        chat_id,
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали",
+                        reply_markup=get_reply_buttons()
+                    )
+                elif text == "🕰️ Графік роботи":
+                    send_message(
+                        chat_id,
+                        "Ми працюємо цілодобово. Звертайтесь у будь-який час.",
+                        reply_markup=get_reply_buttons()
+                    )
+                elif text == "📝 Повідомити про подію":
+                    desc = (
+                        "Оберіть тип події, яку хочете повідомити:\n\n"
+                        "🏗️ Техногенні: Події, пов'язані з діяльністю людини (аварії, катастрофи на виробництві/транспорті).\n\n"
+                        "🌪️ Природні: Події, спричинені силами природи (землетруси, повені, буревії).\n\n"
+                        "👥 Соціальні: Події, пов'язані з суспільними конфліктами або масовими заворушеннями.\n\n"
+                        "⚔️ Воєнні: Події, пов'язані з військовими діями або конфліктами.\n\n"
+                        "🕵️‍♂️ Розшук: Дії, спрямовані на пошук зниклих осіб або злочинців.\n\n"
+                        "📦 Інші події: Загальна категорія для всього, що не вписується в попередні визначення."
+                    )
+                    send_message(chat_id, desc, reply_markup=get_admin_subcategory_buttons())
+                elif text == "📊 Статистика подій":
+                    stats = get_stats()
+                    if stats:
+                        msg = format_stats_message(stats)
+                        send_message(chat_id, msg, parse_mode='HTML')
+                    else:
+                        send_message(chat_id, "Наразі статистика недоступна.")
+                elif text == "📣 Реклама":
+                    with GLOBAL_LOCK:
+                        pending_mode[chat_id] = "ad"
+                        pending_media[chat_id] = []
+                    send_media_collection_keyboard(chat_id)
+            elif text in ADMIN_SUBCATEGORIES:
+                with GLOBAL_LOCK:
+                    user_admin_category[chat_id] = text
+                    pending_mode[chat_id] = "event"
+                    pending_media[chat_id] = []
+                send_media_collection_keyboard(chat_id)
+
+            else:
+                # По умолчанию — если пришло сообщение от пользователя (не админа), отправляем карточку админу с кнопками Reply / Add to stats
+                if from_id != ADMIN_ID:
+                    orig_chat_id = chat_id
+                    orig_msg_id = message.get('message_id')
+                    admin_info = build_admin_info(message)
+                    orig_user_id = message.get('from', {}).get('id')
+                    reply_markup = _get_reply_markup_for_admin(orig_user_id, orig_chat_id, orig_msg_id)
+                    send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
+                    send_message(chat_id, "Дякуємо! Ваше повідомлення отримано — наш адміністратор перевірить його.", reply_markup=get_reply_buttons())
+
+        return "ok", 200
+
+    except Exception as e:
+        cool_error_handler(e, context="webhook - outer")
+        MainProtokol(str(e), 'Помилка webhook')
+        return "ok", 200
+
+@app.route('/', methods=['GET'])
+def index():
+    try:
+        MainProtokol('Відвідання сайту')
+        return "Бот працює", 200
+    except Exception as e:
+        cool_error_handler(e, context="index route")
+        return "Error", 500
+
+if __name__ == "__main__":
+    try:
+        threading.Thread(target=time_debugger, daemon=True).start()
+    except Exception as e:
+        cool_error_handler(e, context="main: start time_debugger")
+    try:
+        threading.Thread(target=stats_autoclear_daemon, daemon=True).start()
+    except Exception as e:
+        cool_error_handler(e, context="main: start stats_autoclear_daemon")
+    port = int(os.getenv("PORT", 5000))
+    try:
+        app.run(host="0.0.0.0", port=port)
+    except Exception as e:
+        cool_error_handler(e, context="main: app.run")
