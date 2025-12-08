@@ -81,19 +81,20 @@ def time_debugger():
         time.sleep(300)
 
 # ====== Главное меню (reply-кнопки) — премиальное оформление ======
+# Визуально изменён элемент "Реклама" на "📣 Реклама 🔔" чтобы отличаться от "📝 Повідомити про подію"
 MAIN_MENU = [
     "✨ Головне",
     "📢 Про нас",
     "🕰️ Графік роботи",
     "📝 Повідомити про подію",
     "📊 Статистика подій",
-    "📣 Реклама"
+    "📣 Реклама 🔔"
 ]
 
 def get_reply_buttons():
     return {
         "keyboard": [
-            [{"text": "📣 Реклама"}],
+            [{"text": "📣 Реклама 🔔"}],
             [{"text": "📢 Про нас"}, {"text": "🕰️ Графік роботи"}],
             [{"text": "📝 Повідомити про подію"}, {"text": "📊 Статистика подій"}]
         ],
@@ -405,8 +406,27 @@ def _get_reply_markup_for_admin(user_id: int, orig_chat_id: int = None, orig_msg
     return kb
 
 # ====== Новый helper: строим расширённую карточку для админа (окультуренная) ======
-def build_admin_info(message: dict, category: str = None) -> str:
+def build_admin_info(message: dict, category: str = None, msg_type: str = None) -> str:
+    """
+    msg_type: 'event' | 'ad' | 'message' (None: inferred from category)
+    """
     try:
+        # determine message type if not given
+        final_type = msg_type
+        if final_type is None:
+            final_type = 'event' if category else 'message'
+
+        # choose title/header based on type
+        if final_type == 'event':
+            title = "📩 Нова подія"
+            sep = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        elif final_type == 'ad':
+            title = "📣 Рекламне повідомлення"
+            sep = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        else:
+            title = "📩 Нове повідомлення"
+            sep = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
         user = message.get('from', {}) or {}
         first = (user.get('first_name') or "").strip()
         last = (user.get('last_name') or "").strip()
@@ -463,8 +483,8 @@ def build_admin_info(message: dict, category: str = None) -> str:
         category_html = escape(category) if category else None
 
         parts = []
-        parts.append("<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>")
-        parts.append("<b>📩 Нове повідомлення</b>")
+        parts.append(f"<pre>{sep}</pre>")
+        parts.append(f"<b>{title}</b>")
         parts.append("")
 
         # big profile
@@ -496,7 +516,7 @@ def build_admin_info(message: dict, category: str = None) -> str:
 
         parts.append("")
         parts.append("<i>Повідомлення відформатовано для зручного перегляду.</i>")
-        parts.append("<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>")
+        parts.append(f"<pre>{sep}</pre>")
 
         return "\n".join(parts)
     except Exception as e:
@@ -721,6 +741,7 @@ def send_compiled_media_to_admin(chat_id):
     with GLOBAL_LOCK:
         if pending_mode.get(chat_id) == "event":
             m_category = user_admin_category.get(chat_id, 'Без категорії')
+        current_mode = pending_mode.get(chat_id)
     if m_category in ADMIN_SUBCATEGORIES:
         try:
             save_event(m_category)
@@ -732,7 +753,16 @@ def send_compiled_media_to_admin(chat_id):
     orig_chat_id = msgs[0]['chat']['id']
     orig_msg_id = msgs[0].get('message_id')
     orig_user_id = msgs[0].get('from', {}).get('id')
-    admin_info = build_admin_info(msgs[0], category=m_category)
+
+    # determine message_type for admin card
+    if current_mode == "event":
+        admin_msg_type = "event"
+    elif current_mode == "ad":
+        admin_msg_type = "ad"
+    else:
+        admin_msg_type = "message"
+
+    admin_info = build_admin_info(msgs[0], category=m_category, msg_type=admin_msg_type)
     reply_markup = _get_reply_markup_for_admin(orig_user_id, orig_chat_id, orig_msg_id)
     send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
 
@@ -942,13 +972,16 @@ def webhook():
         # MESSAGE HANDLING
         if 'message' in update:
             message = update['message']
-            chat_id = message['chat']['id']
-            from_id = message['from']['id']
+            # guard: ensure expected fields exist
+            chat = message.get('chat') or {}
+            frm = message.get('from') or {}
+            chat_id = chat.get('id')
+            from_id = frm.get('id')
             text = message.get('text', '')
 
             # ---- ПАКЕТНЫЙ РЕЖИМ СОБОРА МЕДИА/ТЕКСТА ----
             with GLOBAL_LOCK:
-                in_pending = chat_id in pending_mode
+                in_pending = chat_id in pending_mode if chat_id is not None else False
             if in_pending:
                 if text == "✅ Надіслати":
                     send_compiled_media_to_admin(chat_id)
@@ -1063,7 +1096,7 @@ def webhook():
                 elif text == "📢 Про нас":
                     send_message(
                         chat_id,
-                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали та послуги.",
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали та послуgi.",
                         reply_markup=get_reply_buttons()
                     )
                 elif text == "🕰️ Графік роботи":
@@ -1073,7 +1106,7 @@ def webhook():
                         reply_markup=get_reply_buttons()
                     )
                 elif text == "📝 Повідомити про подію":
-                    # Изменено: пропускаем шаг выбора категории и сразу переводим пользователя в режим отправки медиа
+                    # Изменено ранее: пропускаем шаг выбора категії і сразу переводим пользователя в режим отправки медиа
                     with GLOBAL_LOCK:
                         user_admin_category[chat_id] = "Без категорії"
                         pending_mode[chat_id] = "event"
@@ -1086,7 +1119,8 @@ def webhook():
                         send_message(chat_id, msg, parse_mode='HTML')
                     else:
                         send_message(chat_id, "Наразі статистика недоступна.")
-                elif text == "📣 Реклама":
+                elif text == "📣 Реклама 🔔":
+                    # обработчик обновлён под новую визуальную метку кнопки "Реклама"
                     with GLOBAL_LOCK:
                         pending_mode[chat_id] = "ad"
                         pending_media[chat_id] = []
@@ -1103,7 +1137,8 @@ def webhook():
                 if from_id != ADMIN_ID:
                     orig_chat_id = chat_id
                     orig_msg_id = message.get('message_id')
-                    admin_info = build_admin_info(message)
+                    # default (one-shot) messages considered generic 'message' type
+                    admin_info = build_admin_info(message, msg_type="message")
                     orig_user_id = message.get('from', {}).get('id')
                     reply_markup = _get_reply_markup_for_admin(orig_user_id, orig_chat_id, orig_msg_id)
                     send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
