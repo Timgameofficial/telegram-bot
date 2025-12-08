@@ -368,7 +368,7 @@ def build_welcome_message(user: dict) -> str:
         cool_error_handler(e, "build_welcome_message")
         return "Ласкаво просимо! Використайте меню для початку."
 
-# ====== Отправка сообщений (parse_mode поддержвается) ======
+# ====== Отправка сообщений (parse_mode поддерживается) ======
 def send_message(chat_id, text, reply_markup=None, parse_mode=None, timeout=8):
     if not TOKEN:
         print("[WARN] Попытка отправки сообщения без TOKEN")
@@ -579,8 +579,12 @@ def forward_admin_message_to_user(user_id: int, admin_msg: dict):
             url = f"https://api.telegram.org/bot{TOKEN}/sendVoice"
             payload = {"chat_id": user_id, "voice": file_id}
             if safe_caption:
-                payload["caption"] = f"💬 Відповідь адміністратора:\n<pre>{safe_caption}</pre>"
-                payload["parse_mode"] = "HTML"
+                # sendVoice doesn't support caption param in some API versions; keep it minimal
+                try:
+                    payload["caption"] = f"💬 Відповідь адміністратора:\n<pre>{safe_caption}</pre>"
+                    payload["parse_mode"] = "HTML"
+                except Exception:
+                    pass
             _post_request(url, data=payload)
             return True
 
@@ -643,7 +647,8 @@ def send_media_collection_keyboard(chat_id):
     }
     send_message(
         chat_id,
-         "Надсилайте усі потрібні фото, відео, документи та/або текст (кілька повідомлень). Як закінчите — натисніть «✅ Надіслати».",
+        "Надсилайте усі потрібні фото, відео, документи та/або текст (кілька повідомлень). "
+        "Як закінчите — натисніть ✅ Надіслати.",
         reply_markup=kb
     )
 
@@ -709,7 +714,7 @@ def _collect_media_summary_and_payloads(msgs):
 def send_compiled_media_to_admin(chat_id):
     with GLOBAL_LOCK:
         msgs = list(pending_media.get(chat_id, []))
-    If not msgs:
+    if not msgs:
         send_message(chat_id, "Немає медіа для надсилання.")
         return
     m_category = None
@@ -835,7 +840,7 @@ def format_stats_message(stats: dict) -> str:
         month = stats.get(cat, {}).get('month', 0)
         lines.append(f"{name.ljust(max_cat_len)}  {str(week):>6}  {str(month):>6}")
     content = "\n".join(lines)
-    return "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + content + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━��[...]
+    return "<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + content + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>"
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
@@ -898,10 +903,10 @@ def webhook():
                         if 0 <= cat_idx < len(ADMIN_SUBCATEGORIES):
                             category = ADMIN_SUBCATEGORIES[cat_idx]
                             save_event(category)
-                            send_message(ADMIN_ID, f"✅ Повідомлення додано до статистики як: <b>{escape(category)}</b>", parse_mode="HTML", reply_markup=get_reply_but[...]
+                            send_message(ADMIN_ID, f"✅ Повідомлення додано до статистики як: <b>{escape(category)}</b>", parse_mode="HTML", reply_markup=get_reply_buttons())
                             if NOTIFY_USER_ON_ADD_STAT:
                                 try:
-                                    send_message(orig_chat_id, f"ℹ️ Ваше повідомлення було додано до статистики як: <b>{escape(category)}</b>", parse_mode="[...]
+                                    send_message(orig_chat_id, f"ℹ️ Ваше повідомлення було додано до статистики як: <b>{escape(category)}</b>", parse_mode="HTML")
                                 except Exception as e:
                                     MainProtokol(str(e), 'notify_user_add_stat_err')
                         else:
@@ -917,7 +922,8 @@ def webhook():
                 if data == "about":
                     send_message(
                         chat_id,
-                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канал[...]
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали та послуги.",
+                        reply_markup=get_reply_buttons()
                     )
                 elif data == "schedule":
                     send_message(
@@ -1009,7 +1015,7 @@ def webhook():
                     with GLOBAL_LOCK:
                         admin_adding_event.setdefault(from_id, {"category": admin_flow["category"], "messages": []})
                         admin_adding_event[from_id]["messages"].append(message)
-                    send_message(ADMIN_ID, "Додано до події. Продовжуйте надсилати матеріали або натисніть ✅ Підтвердити / ❌ Від[...]
+                    send_message(ADMIN_ID, "Додано до події. Продовжуйте надсилати матеріали або натисніть ✅ Підтвердити / ❌ Відмінити", reply_markup=get_reply_buttons())
                     return "ok", 200
 
             # Ответ администратора пользователю (теперь поддерживает медиа)
@@ -1057,7 +1063,7 @@ def webhook():
                 elif text == "📢 Про нас":
                     send_message(
                         chat_id,
-                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канал[...]
+                        "Ми створюємо телеграм-ботів та сервіси для вашого бізнесу і життя.\nДізнатись більше: наші канали та послуги.",
                         reply_markup=get_reply_buttons()
                     )
                 elif text == "🕰️ Графік роботи":
@@ -1067,13 +1073,8 @@ def webhook():
                         reply_markup=get_reply_buttons()
                     )
                 elif text == "📝 Повідомити про подію":
-                    # Изменено: пропускаем шаг выбора категории.
-                    # Раньше отправлялся длинный текст и клавиатура с категориями:
-                    # send_message(chat_id, desc, reply_markup=get_admin_subcategory_buttons())
-                    # Теперь сразу переводим пользователя в режим отправки медиа для події,
-                    # сохраняя последующие шаги (сбор медиа и отправка администратору).
+                    # Изменено: пропускаем шаг выбора категории и сразу переводим пользователя в режим отправки медиа
                     with GLOBAL_LOCK:
-                        # По умолчанию помечаем категорию как "Без категорії" (можно изменить при необходимости)
                         user_admin_category[chat_id] = "Без категорії"
                         pending_mode[chat_id] = "event"
                         pending_media[chat_id] = []
@@ -1098,7 +1099,7 @@ def webhook():
                 send_media_collection_keyboard(chat_id)
 
             else:
-                # По умолчанию — если пришло сообщение от пользователя (не админа), отправляем карточку админу с кноп[...]
+                # По умолчанию — если пришло сообщение от пользователя (не админа), отправляем карточку админу
                 if from_id != ADMIN_ID:
                     orig_chat_id = chat_id
                     orig_msg_id = message.get('message_id')
@@ -1106,7 +1107,7 @@ def webhook():
                     orig_user_id = message.get('from', {}).get('id')
                     reply_markup = _get_reply_markup_for_admin(orig_user_id, orig_chat_id, orig_msg_id)
                     send_message(ADMIN_ID, admin_info, reply_markup=reply_markup, parse_mode="HTML")
-                    send_message(chat_id, "Дякуємо! Ваше повідомлення отримано — наш адміністратор перевірить його.", reply_markup=get_re[...]
+                    send_message(chat_id, "Дякуємо! Ваше повідомлення отримано — наш адміністратор перевірить його.", reply_markup=get_reply_buttons())
 
         return "ok", 200
 
