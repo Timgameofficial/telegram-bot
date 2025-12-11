@@ -1,6 +1,7 @@
 # Упрощённый (LIGHT) Telegram webhook бот
 # Поддерживает: стартовое меню, приём текст/фото/видео, пересылку админу,
 # функция "Написати адміну" с возможностью ответить (текст/медиа).
+# Легкий, без БД, без cron и лишней логики.
 import os
 import json
 import requests
@@ -23,6 +24,8 @@ app = Flask(__name__)
 def log(msg):
     print(f"[BOT] {msg}")
 
+log(f"Starting bot. ADMIN_ID={ADMIN_ID}, API_TOKEN set={'yes' if API_TOKEN else 'no'}")
+
 # ---- UI / клавиатура ----
 MAIN_MENU = [
     "Про канал",
@@ -32,8 +35,12 @@ MAIN_MENU = [
 ]
 
 def get_main_keyboard():
+    # Две строки по две кнопки для компактности
     kb = {
-        "keyboard": [[{"text": b}] for b in MAIN_MENU],
+        "keyboard": [
+            [{"text": "Про канал"}, {"text": "Реклама"}],
+            [{"text": "Написати адміну"}, {"text": "Надіслати повідомлення"}]
+        ],
         "resize_keyboard": True,
         "one_time_keyboard": False
     }
@@ -47,7 +54,17 @@ def _post(url, data=None, files=None, timeout=10):
             log(f"HTTP {url} failed: {r.status_code} {r.text}")
         return r
     except Exception as e:
-        log(f"Network error: {e}")
+        log(f"Network error POST {url}: {e}")
+        return None
+
+def _get(url, params=None, timeout=10):
+    try:
+        r = requests.get(url, params=params, timeout=timeout)
+        if not r.ok:
+            log(f"HTTP GET {url} failed: {r.status_code} {r.text}")
+        return r
+    except Exception as e:
+        log(f"Network error GET {url}: {e}")
         return None
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=None, timeout=8):
@@ -64,19 +81,20 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None, timeout=8):
 
 def forward_message(to_chat_id, from_chat_id, message_id):
     if not API_TOKEN:
+        log("API_TOKEN not set for forward")
         return None
     url = f"https://api.telegram.org/bot{API_TOKEN}/forwardMessage"
     payload = {"chat_id": to_chat_id, "from_chat_id": from_chat_id, "message_id": message_id}
     return _post(url, data=payload)
 
-# ---- Простая загрузка файлов в media/ (опционально) ----
+# ---- Простая загрузка файлов в media/ (best-effort) ----
 def download_file_by_id(file_id, dest_dir="media"):
     if not API_TOKEN:
         return None
     try:
         os.makedirs(dest_dir, exist_ok=True)
-        url_get = f"https://api.telegram.org/bot{API_TOKEN}/getFile"
-        r = _post(url_get, data={"file_id": file_id})
+        # getFile via GET with params
+        r = _get(f"https://api.telegram.org/bot{API_TOKEN}/getFile", params={"file_id": file_id})
         if not r or not r.ok:
             return None
         info = r.json()
@@ -98,11 +116,12 @@ def download_file_by_id(file_id, dest_dir="media"):
         log(f"download_file_by_id error: {e}")
         return None
 
-# ---- Reply flow: админ нажал "Reply" — ждём следующее сообщение от админа ----
+# ---- Состояния ----
 waiting_for_admin_reply = {}  # admin_id -> {'user_chat_id': int}
+pending_contact = set()       # chat_id пользователей, которые нажали "Написати адміну" или "Надіслати повідомлення"
 
 # ---- Формирование карточки для админа ----
-def build_admin_card(message):
+def build_admin_card(message, tag="Повідомлення"):
     frm = message.get("from", {}) or {}
     first = (frm.get("first_name") or "").strip()
     last = (frm.get("last_name") or "").strip()
@@ -118,7 +137,7 @@ def build_admin_card(message):
     text = message.get("text") or message.get("caption") or ""
     uname = f"@{escape(username)}" if username else "-"
     card_lines = [
-        "<b>Нове повідомлення від користувача</b>",
+        f"<b>📩 {escape(tag)}</b>",
         f"<b>Ім'я:</b> {escape(display)}",
         f"<b>Username:</b> {uname}",
         f"<b>ID:</b> {escape(str(user_id))}",
@@ -131,17 +150,18 @@ def build_admin_card(message):
         card_lines.append("")
         card_lines.append("<b>Текст:</b>")
         card_lines.append(f"<pre>{safe}</pre>")
-    # inline button to reply
+
+    # inline button to reply (admin can press to trigger one-time reply flow)
+    chat_id = message.get("chat", {}).get("id", user_id)
     reply_button = {
         "inline_keyboard": [
-            [{"text": "✉️ Reply", "callback_data": f"reply_{user_id}_{message.get('chat',{}).get('id')}_{msg_id}"}]
+            [{"text": "✉️ Reply", "callback_data": f"reply_{user_id}_{chat_id}_{msg_id}"}]
         ]
     }
     return "\n".join(card_lines), reply_button
 
 # ---- Обработка сообщений администратора, пересылка пользователю ----
 def forward_admin_to_user(user_chat_id, admin_message):
-    # Если админ отправляет медиа, пробуем переслать их с использованием file_id
     try:
         # photo
         if "photo" in admin_message:
@@ -176,6 +196,17 @@ def forward_admin_to_user(user_chat_id, admin_message):
                 payload["parse_mode"] = "HTML"
             _post(url, data=payload)
             return True
+        # animation (gif)
+        if "animation" in admin_message:
+            file_id = admin_message["animation"].get("file_id")
+            url = f"https://api.telegram.org/bot{API_TOKEN}/sendAnimation"
+            payload = {"chat_id": user_chat_id, "animation": file_id}
+            caption = admin_message.get("caption") or admin_message.get("text")
+            if caption:
+                payload["caption"] = caption
+                payload["parse_mode"] = "HTML"
+            _post(url, data=payload)
+            return True
         # text / fallback
         text = admin_message.get("text") or ""
         if text:
@@ -200,19 +231,18 @@ def webhook():
             call = update["callback_query"]
             data = call.get("data", "")
             from_id = call.get("from", {}).get("id")
-            # only admin can use reply
+            callback_id = call.get("id")
             if data.startswith("reply_") and from_id == ADMIN_ID:
                 # format: reply_{user_id}_{user_chat_id}_{orig_msg_id}
                 parts = data.split("_")
                 try:
                     user_id = int(parts[1])
                     user_chat = int(parts[2]) if len(parts) > 2 else user_id
-                    waiting_for_admin_reply[ADMIN_ID] = {"user_chat_id": user_chat}
-                    send_message(ADMIN_ID, f"✍️ Напишіть відповідь для користувача {user_id} (текст або фото/відео).")
+                    waiting_for_admin_reply[ADMIN_ID] = {"user_chat_id": user_chat, "user_id": user_id}
+                    send_message(ADMIN_ID, f"✍️ Напишіть відповідь для користувача {user_id} (текст або фото/відео).", reply_markup=get_main_keyboard())
                 except Exception as e:
                     log(f"callback reply parse error: {e}")
-            # answer callback quickly (optional)
-            # NOTE: We're not sending answerCallbackQuery to Telegram to keep simple
+            # quick ACK optional: answerCallbackQuery to remove loading - keep simple and silent
             return "ok", 200
 
         # Message handling
@@ -235,8 +265,9 @@ def webhook():
                         send_message(ADMIN_ID, f"❌ Не вдалося відправити користувачу {user_chat}.", reply_markup=get_main_keyboard())
                     return "ok", 200
 
-            # Команды и меню для всех пользователей
+            # Команды и меню
             text = msg.get("text", "")
+
             if text == "/start":
                 send_message(chat_id, "Вітаємо! Оберіть дію:", reply_markup=get_main_keyboard())
                 return "ok", 200
@@ -245,43 +276,39 @@ def webhook():
                 if text == "Про канал":
                     about = (
                         "<b>Про канал</b>\n\n"
-                        "Тут короткий опис вашого каналу. Публікуємо важливі новини та оголошення."
+                        "Короткий опис вашого каналу. Публікуємо важливі новини та оголошення."
                     )
                     send_message(chat_id, about, parse_mode="HTML", reply_markup=get_main_keyboard())
                     return "ok", 200
                 if text == "Реклама":
                     ad = (
                         "<b>Реклама</b>\n\n"
-                        "Тут інформація про розміщення реклами. Надішліть матеріал — ми його переглянемо."
+                        "Інформація про розміщення реклами. Надішліть матеріал — ми його переглянемо."
                     )
                     send_message(chat_id, ad, parse_mode="HTML", reply_markup=get_main_keyboard())
                     return "ok", 200
-                if text == "Написати адміну":
-                    send_message(chat_id, "✉️ Напишіть текст, який буде пересланий адміну.", reply_markup=get_main_keyboard())
-                    # we simply treat next message as message to admin (no separate state per user)
-                    # create a simple marker: store user wants to contact admin
-                    # For simplicity, mark by storing special waiting dict keyed by chat_id
-                    request.environ.setdefault("user_wants_admin", True)
-                    # Note: since we run via webhook, we'll handle by checking last message text below
-                    return "ok", 200
-                if text == "Надіслати повідомлення":
-                    send_message(chat_id, "📝 Надішліть ваше повідомлення (текст або фото/відео).", reply_markup=get_main_keyboard())
-                    # mark user is in send flow by simple ephemeral approach:
-                    # We'll recognize subsequent messages from this chat as to-be-sent (no persistent state)
-                    # For webhook simplicity, we rely on user sending right away
-                    # To be robust, we will treat any non-admin incoming message as an item to forward
+                if text == "Написати адміну" or text == "Надіслати повідомлення":
+                    pending_contact.add(chat_id)
+                    send_message(chat_id, "✉️ Надішліть текст або фото/відео — ми пересилаємо адміну. (Надішліть одне повідомлення.)", reply_markup=get_main_keyboard())
                     return "ok", 200
 
-            # По умолчанию: если пришло сообщение от пользователя (не админа) — пересылаем админу
-            if from_id != ADMIN_ID:
-                # Build admin card and send
-                card_text, reply_btn = build_admin_card(msg)
-                send_message(ADMIN_ID, card_text, reply_markup=reply_btn, parse_mode="HTML")
-
-                # If there is media, forward the whole original message so admin sees media intact
-                orig_msg_id = msg.get("message_id")
-                if "photo" in msg or "video" in msg or "document" in msg or "animation" in msg:
-                    # Try downloading media locally (best-effort)
+            # Если пользователь помечен как ожидающий пересылки админу
+            if from_id != ADMIN_ID and chat_id in pending_contact:
+                # Определим тег: реклама или повідомлення, по последней кнопке — не храним отдельно, просто помечаем как "Повідомлення" или "Реклама"
+                # Для простоты: если текст содержит слово "реклама" или user нажал "Реклама" раньше - мы не храним это; оставим общий тег.
+                tag = "Повідомлення"
+                card_text, reply_btn = build_admin_card(msg, tag=tag)
+                # Отправим карточку админу с информацией
+                if ADMIN_ID and API_TOKEN:
+                    send_message(ADMIN_ID, card_text, reply_markup=reply_btn, parse_mode="HTML")
+                    # Если есть медиа — пересылаем оригинал (forwardMessage preserves media)
+                    orig_msg_id = msg.get("message_id")
+                    if "photo" in msg or "video" in msg or "document" in msg or "animation" in msg:
+                        try:
+                            forward_message(ADMIN_ID, chat_id, orig_msg_id)
+                        except Exception as e:
+                            log(f"forward_message failed: {e}")
+                    # Попытка скачать медиа локально (необязательно) — best-effort
                     try:
                         if "photo" in msg:
                             file_id = msg["photo"][-1].get("file_id")
@@ -294,14 +321,15 @@ def webhook():
                             _ = download_file_by_id(file_id)
                     except Exception as e:
                         log(f"media download error: {e}")
-                    # Forward to admin to preserve media
-                    forward_message(ADMIN_ID, chat_id, orig_msg_id)
+                    send_message(chat_id, "Дякуємо! Ваше повідомлення отримано та переслано адміну.", reply_markup=get_main_keyboard())
                 else:
-                    # no media: include text already in card; nothing else to forward
-                    pass
+                    send_message(chat_id, "Відправити адміну тимчасово неможливо (ADMIN_ID або API_TOKEN не налаштовані).", reply_markup=get_main_keyboard())
+                pending_contact.discard(chat_id)
+                return "ok", 200
 
-                # Acknowledge user
-                send_message(chat_id, "Дякуємо! Ваше повідомлення отримано.", reply_markup=get_main_keyboard())
+            # Если не в режиме отправки — подсказка
+            if from_id != ADMIN_ID:
+                send_message(chat_id, "Щоб надіслати повідомлення адміну — натисніть кнопку «Надіслати повідомлення» або «Написати адміну».", reply_markup=get_main_keyboard())
                 return "ok", 200
 
         return "ok", 200
